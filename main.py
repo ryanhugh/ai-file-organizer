@@ -51,20 +51,22 @@ class FileOrganizer:
         self.transcribe_videos = transcribe_videos
         
         # Initialize components
+        self.categorizer = LLMCategorizer(model=model)
+        
         video_transcriber = None
         if transcribe_videos:
             print(f"Initializing Whisper model '{whisper_model}' for video transcription...")
             video_transcriber = VideoTranscriber(
                 model_size=whisper_model,
                 enable_ocr=True,
-                frame_interval=5  # Extract frame every 5 seconds
+                frame_interval=5,  # Extract frame every 5 seconds
+                llm_client=self.categorizer.client  # Pass Ollama client for summaries
             )
         
         self.extractor = FileExtractor(
             transcribe_videos=transcribe_videos,
             video_transcriber=video_transcriber
         )
-        self.categorizer = LLMCategorizer(model=model)
         self.project_manager = ProjectManager(output_dir)
         
         # Validate directories

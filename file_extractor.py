@@ -112,8 +112,13 @@ class FileExtractor:
                 if self.transcribe_videos and self.video_transcriber:
                     transcription = self.video_transcriber.transcribe_video(file_path)
                     if transcription['success']:
-                        result['content'] = f"Video file: {file_path.name}\n\nTranscription:\n{transcription['text']}"
+                        # Use summary if available, otherwise use full transcription
+                        if transcription.get('summary'):
+                            result['content'] = f"Video file: {file_path.name}\n\nSummary: {transcription['summary']}"
+                        else:
+                            result['content'] = f"Video file: {file_path.name}\n\nTranscription:\n{transcription['text']}"
                         result['transcription'] = transcription['text']
+                        result['summary'] = transcription.get('summary', '')
                     else:
                         result['content'] = f"Video file: {file_path.name} (transcription failed)"
                 else:

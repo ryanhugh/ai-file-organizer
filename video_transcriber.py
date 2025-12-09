@@ -26,7 +26,7 @@ except ImportError:
     CV2_AVAILABLE = False
 
 try:
-    import pytesseract
+    import easyocr
     from PIL import Image
     OCR_AVAILABLE = True
 except ImportError:
@@ -36,7 +36,7 @@ except ImportError:
 class VideoTranscriber:
     """Transcribe audio from video and audio files using Whisper and OCR."""
     
-    def __init__(self, model_size: str = "base", enable_ocr: bool = True, frame_interval: int = 5):
+    def __init__(self, model_size: str = "base", enable_ocr: bool = True, frame_interval: int = 5, llm_client=None):
         """
         Initialize the transcriber.
         
@@ -48,6 +48,7 @@ class VideoTranscriber:
                        - medium/large: Best accuracy, much slower
             enable_ocr: Whether to extract and OCR video frames
             frame_interval: Extract one frame every N seconds for OCR
+            llm_client: Ollama client for generating summaries
         """
         if not WHISPER_AVAILABLE:
             raise ImportError(
@@ -61,15 +62,21 @@ class VideoTranscriber:
         
         self.enable_ocr = enable_ocr
         self.frame_interval = frame_interval
+        self.ocr_reader = None
+        self.llm_client = llm_client
         
         if enable_ocr:
             if not CV2_AVAILABLE:
                 print("Warning: OpenCV not available. Frame extraction disabled.")
                 self.enable_ocr = False
             elif not OCR_AVAILABLE:
-                print("Warning: pytesseract not available. OCR disabled.")
+                print("Warning: EasyOCR not available. OCR disabled.")
                 self.enable_ocr = False
             else:
+                print(f"Initializing EasyOCR (this may take a moment)...")
+                # Initialize EasyOCR with English support
+                # gpu=False for CPU, set to True if you have CUDA
+                self.ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
                 print(f"OCR enabled: extracting frames every {frame_interval} seconds")
         
     def transcribe_video(self, video_path: Path, max_duration: int = 300) -> Dict[str, Any]:
@@ -122,6 +129,14 @@ class VideoTranscriber:
             if ocr_text:
                 combined_text = f"{transcription_text}\n\n[Screen Text from Video]:\n{ocr_text}"
             
+            # Generate a summary using LLM
+            summary = self._generate_summary(video_path.name, transcription_text, ocr_text)
+            if summary:
+                print(f"  📋 Summary:")
+                print(f"  {'-' * 70}")
+                print(f"  {summary}")
+                print(f"  {'-' * 70}\n")
+            
             # Clean up temp file
             try:
                 os.unlink(temp_audio_path)
@@ -130,6 +145,7 @@ class VideoTranscriber:
             
             return {
                 'text': combined_text,
+                'summary': summary,
                 'audio_transcription': transcription_text,
                 'ocr_text': ocr_text,
                 'language': result.get('language', 'en'),
@@ -257,7 +273,7 @@ class VideoTranscriber:
     
     def _extract_and_ocr_frames(self, video_path: Path, max_duration: int = 300) -> str:
         """
-        Extract frames from video and perform OCR on them.
+        Extract frames from video and perform OCR on them using ffmpeg.
         
         Args:
             video_path: Path to video file
@@ -272,49 +288,77 @@ class VideoTranscriber:
         try:
             print(f"  Extracting frames for OCR...")
             
-            # Open video
-            cap = cv2.VideoCapture(str(video_path))
-            if not cap.isOpened():
-                return ""
+            # Create temp directory for frames
+            import tempfile
+            temp_dir = tempfile.mkdtemp()
             
-            # Get video properties
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            duration = total_frames / fps if fps > 0 else 0
+            # Use ffmpeg to extract frames at intervals
+            # Extract 1 frame every N seconds
+            cmd = [
+                'ffmpeg',
+                '-i', str(video_path),
+                '-t', str(max_duration),  # Limit duration
+                '-vf', f'fps=1/{self.frame_interval}',  # 1 frame every N seconds
+                '-q:v', '2',  # High quality
+                '-f', 'image2',
+                f'{temp_dir}/frame_%04d.jpg'
+            ]
             
-            # Limit duration
-            process_duration = min(duration, max_duration)
+            # Run ffmpeg
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False  # Don't raise on error
+            )
             
-            # Calculate frame interval
-            frame_interval = int(fps * self.frame_interval)  # Extract every N seconds
+            if result.returncode != 0:
+                print(f"  Warning: ffmpeg frame extraction had issues")
+            
+            # Read and OCR extracted frames
+            import glob
+            frame_files = sorted(glob.glob(f'{temp_dir}/frame_*.jpg'))
+            
+            print(f"  Found {len(frame_files)} frames to process")
             
             ocr_results = []
-            frame_count = 0
             extracted_count = 0
+            prev_text_hash = None
             
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            for i, frame_file in enumerate(frame_files):
+                # Read frame with OpenCV
+                frame = cv2.imread(frame_file)
+                if frame is None:
+                    continue
                 
-                # Check if we've exceeded max duration
-                current_time = frame_count / fps
-                if current_time > process_duration:
-                    break
+                # Perform OCR on frame
+                text = self._ocr_frame(frame)
+                raw_text_len = len(text) if text else 0
+                cleaned_text_len = len(text.strip()) if text else 0
                 
-                # Extract frame at intervals
-                if frame_count % frame_interval == 0:
-                    # Perform OCR on frame
-                    text = self._ocr_frame(frame)
-                    if text.strip():
+                # Debug: show what we're getting
+                if i < 2 and raw_text_len > 0:  # Show first 2 frames
+                    print(f"    Frame {i+1} raw OCR ({raw_text_len} chars): {text[:200]}")
+                
+                if cleaned_text_len > 0:
+                    print(f"    Frame {i+1}: {raw_text_len} -> {cleaned_text_len} chars after cleaning")
+                
+                if text.strip():
+                    # Simple deduplication based on text similarity
+                    text_hash = hash(text[:200])  # Hash first 200 chars
+                    if prev_text_hash is None or text_hash != prev_text_hash:
                         ocr_results.append(text.strip())
                         extracted_count += 1
-                
-                frame_count += 1
+                        prev_text_hash = text_hash
             
-            cap.release()
+            # Clean up temp files
+            import shutil
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                pass
             
-            print(f"  Extracted and OCR'd {extracted_count} frames")
+            print(f"  Extracted and OCR'd {extracted_count} frames with readable text")
             
             # Combine and deduplicate OCR results
             if ocr_results:
@@ -338,7 +382,7 @@ class VideoTranscriber:
     
     def _ocr_frame(self, frame) -> str:
         """
-        Perform OCR on a single video frame with preprocessing.
+        Perform OCR on a single video frame using EasyOCR.
         
         Args:
             frame: OpenCV frame (numpy array)
@@ -347,30 +391,15 @@ class VideoTranscriber:
             Extracted text
         """
         try:
-            # Convert to grayscale
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if self.ocr_reader is None:
+                return ""
             
-            # Apply preprocessing to improve OCR quality
-            # 1. Increase contrast
-            gray = cv2.convertScaleAbs(gray, alpha=1.5, beta=0)
+            # EasyOCR works directly with numpy arrays (OpenCV frames)
+            # It handles preprocessing internally
+            results = self.ocr_reader.readtext(frame, detail=0, paragraph=True)
             
-            # 2. Denoise
-            gray = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
-            
-            # 3. Apply adaptive thresholding to handle varying lighting
-            binary = cv2.adaptiveThreshold(
-                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                cv2.THRESH_BINARY, 11, 2
-            )
-            
-            # Convert to PIL Image
-            pil_image = Image.fromarray(binary)
-            
-            # Perform OCR with better configuration
-            # PSM 6 = Assume a single uniform block of text
-            # PSM 11 = Sparse text. Find as much text as possible in no particular order
-            custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!?@#$%&*()_+-=[]{}:;"\'/\| '
-            text = pytesseract.image_to_string(pil_image, config=custom_config)
+            # Combine all detected text
+            text = '\n'.join(results)
             
             # Clean up the text
             text = self._clean_ocr_text(text)
@@ -404,12 +433,12 @@ class VideoTranscriber:
                 continue
             
             # Skip lines that are mostly non-alphanumeric (likely garbage)
-            alphanumeric_count = sum(c.isalnum() for c in line)
-            if len(line) > 0 and alphanumeric_count / len(line) < 0.3:
+            alphanumeric_count = sum(c.isalnum() or c.isspace() for c in line)
+            if len(line) > 0 and alphanumeric_count / len(line) < 0.5:
                 continue
             
-            # Skip very short lines (likely noise)
-            if len(line) < 3:
+            # Skip very short lines (likely noise) - but allow short meaningful words
+            if len(line) < 2:
                 continue
             
             # Skip lines with too many repeated characters (likely artifacts)
@@ -419,3 +448,50 @@ class VideoTranscriber:
             cleaned_lines.append(line)
         
         return '\n'.join(cleaned_lines)
+    
+    def _generate_summary(self, filename: str, audio_text: str, ocr_text: str) -> str:
+        """
+        Generate a concise summary of the video content using LLM.
+        
+        Args:
+            filename: Name of the video file
+            audio_text: Transcribed audio
+            ocr_text: OCR text from video frames
+            
+        Returns:
+            One paragraph summary
+        """
+        if not self.llm_client:
+            return ""
+        
+        try:
+            # Build context for the LLM
+            context_parts = [f"Video file: {filename}"]
+            
+            if audio_text:
+                context_parts.append(f"\nAudio transcription:\n{audio_text[:1000]}")  # Limit to first 1000 chars
+            
+            if ocr_text:
+                context_parts.append(f"\nText visible on screen:\n{ocr_text[:1000]}")  # Limit to first 1000 chars
+            
+            context = "\n".join(context_parts)
+            
+            # Create prompt for summary
+            prompt = f"""Based on the following video content, write a single concise paragraph (2-3 sentences) describing what this video is about. Focus on the main topic, what's being shown/discussed, and any key technical details.
+
+{context}
+
+Summary:"""
+            
+            # Generate summary using Ollama
+            response = self.llm_client.generate(
+                model='llama3.2:3b',  # Use the same model
+                prompt=prompt
+            )
+            
+            summary = response['response'].strip()
+            return summary
+            
+        except Exception as e:
+            print(f"  Warning: Could not generate summary: {str(e)}")
+            return ""
