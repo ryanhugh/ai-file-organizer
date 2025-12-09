@@ -5,7 +5,7 @@ Process all media files on Desktop and generate summaries.
 import argparse
 from pathlib import Path
 from datetime import datetime
-from multiprocessing import Pool
+from multiprocessing import Process, Queue, Manager
 from processors.images import ImageProcessor
 from processors.videos import VideoTranscriber
 from processors.documents import DocumentProcessor
@@ -14,76 +14,106 @@ from processors.archives import ArchiveProcessor
 from processors.cache import cleanup_cache_locks
 
 
-def process_single_file(file_path_str: str) -> dict:
+def worker_process(worker_id: int, task_queue: Queue, result_queue: Queue):
     """
-    Process a single file (called by worker process).
+    Worker process that initializes processors once and processes files from queue.
     
     Args:
-        file_path_str: String path to the file
-        
-    Returns:
-        Dictionary with filename and summary
+        worker_id: Unique ID for this worker
+        task_queue: Queue to pull file paths from
+        result_queue: Queue to put results into
     """
-    file_path = Path(file_path_str)
+    print(f"Worker {worker_id}: Initializing...")
     
-    # Determine file type and create appropriate processor
-    ext = file_path.suffix.lower()
+    # Initialize all processors once per worker
+    print(f"Worker {worker_id}: Loading ImageProcessor (EasyOCR)...")
+    image_processor = ImageProcessor()
     
-    if ext in ImageProcessor.SUPPORTED_EXTENSIONS:
-        processor = ImageProcessor()
-    elif ext in VideoTranscriber.SUPPORTED_EXTENSIONS:
-        processor = VideoTranscriber(
-            model_size="base",
-            enable_ocr=True,
-            frame_interval=5
-        )
-    elif ext in DocumentProcessor.SUPPORTED_EXTENSIONS:
-        processor = DocumentProcessor()
-    elif ext in TextProcessor.SUPPORTED_EXTENSIONS:
-        processor = TextProcessor()
-    elif ext in ArchiveProcessor.SUPPORTED_EXTENSIONS:
-        processor = ArchiveProcessor()
-    else:
-        return {
-            'filename': file_path.name,
-            'summary': '(Error: Unsupported file type)',
-            'success': False
-        }
+    print(f"Worker {worker_id}: Loading VideoTranscriber (Whisper)...")
+    video_processor = VideoTranscriber(
+        model_size="base",
+        enable_ocr=True,
+        frame_interval=5
+    )
     
-    # Process the file
-    try:
-        result = processor.process(file_path)
+    print(f"Worker {worker_id}: Loading DocumentProcessor...")
+    document_processor = DocumentProcessor()
+    
+    print(f"Worker {worker_id}: Loading TextProcessor...")
+    text_processor = TextProcessor()
+    
+    print(f"Worker {worker_id}: Loading ArchiveProcessor...")
+    archive_processor = ArchiveProcessor()
+    
+    print(f"Worker {worker_id}: Ready to process files\n")
+    
+    # Process files from queue until we get None (poison pill)
+    while True:
+        file_path_str = task_queue.get()
         
-        if result['success']:
-            print(f"✓ Successfully processed {file_path.name}")
-            return {
-                'filename': file_path.name,
-                'summary': result['summary'],
-                'success': True
-            }
+        # None signals end of work
+        if file_path_str is None:
+            break
+        
+        file_path = Path(file_path_str)
+        ext = file_path.suffix.lower()
+        
+        # Select appropriate processor
+        if ext in ImageProcessor.SUPPORTED_EXTENSIONS:
+            processor = image_processor
+        elif ext in VideoTranscriber.SUPPORTED_EXTENSIONS:
+            processor = video_processor
+        elif ext in DocumentProcessor.SUPPORTED_EXTENSIONS:
+            processor = document_processor
+        elif ext in TextProcessor.SUPPORTED_EXTENSIONS:
+            processor = text_processor
+        elif ext in ArchiveProcessor.SUPPORTED_EXTENSIONS:
+            processor = archive_processor
         else:
-            error_msg = result.get('error', 'Unknown error')
-            print(f"✗ Error processing {file_path.name}: {error_msg}")
-            return {
+            result_queue.put({
                 'filename': file_path.name,
-                'summary': f'(Error: {error_msg})',
+                'summary': '(Error: Unsupported file type)',
                 'success': False
-            }
-    except Exception as e:
-        print(f"✗ Unexpected error processing {file_path.name}: {str(e)}")
-        return {
-            'filename': file_path.name,
-            'summary': f'(Unexpected error: {str(e)})',
-            'success': False
-        }
+            })
+            continue
+        
+        # Process the file
+        try:
+            result = processor.process(file_path)
+            
+            if result['success']:
+                print(f"Worker {worker_id}: ✓ {file_path.name}")
+                result_queue.put({
+                    'filename': file_path.name,
+                    'summary': result['summary'],
+                    'success': True
+                })
+            else:
+                error_msg = result.get('error', 'Unknown error')
+                print(f"Worker {worker_id}: ✗ {file_path.name} - {error_msg}")
+                result_queue.put({
+                    'filename': file_path.name,
+                    'summary': f'(Error: {error_msg})',
+                    'success': False
+                })
+        except Exception as e:
+            print(f"Worker {worker_id}: ✗ {file_path.name} - {str(e)}")
+            result_queue.put({
+                'filename': file_path.name,
+                'summary': f'(Unexpected error: {str(e)})',
+                'success': False
+            })
+    
+    print(f"Worker {worker_id}: Shutting down")
 
 
-def process_desktop_media(num_processes: int = 8):
+def process_desktop_media(num_processes: int = 8, group_files: bool = False):
     """
     Process all media files on Desktop.
     
     Args:
         num_processes: Number of parallel processes to use (default: 8)
+        group_files: Whether to group files by semantic similarity
     """
     # Setup paths
     desktop_path = Path.home() / "Desktop"
@@ -121,20 +151,45 @@ def process_desktop_media(num_processes: int = 8):
         print("\nNo media files to process.")
         return
     
-    # Process files in parallel
+    # Create queues for tasks and results
+    task_queue = Queue()
+    result_queue = Queue()
+    
+    # Add all files to task queue
     print(f"\n{'='*80}")
-    print(f"PROCESSING {len(media_files)} FILES WITH {num_processes} PROCESSES")
+    print(f"ADDING {len(media_files)} FILES TO QUEUE")
     print(f"{'='*80}\n")
     
-    # Convert paths to strings for multiprocessing
-    file_paths_str = [str(f) for f in media_files]
+    for file_path in media_files:
+        task_queue.put(str(file_path))
     
-    # Use multiprocessing Pool
-    with Pool(processes=num_processes) as pool:
-        results = pool.map(process_single_file, file_paths_str)
+    # Add poison pills (one per worker to signal completion)
+    for _ in range(num_processes):
+        task_queue.put(None)
     
-    # Filter out None results
-    results = [r for r in results if r is not None]
+    # Start worker processes
+    print(f"{'='*80}")
+    print(f"STARTING {num_processes} WORKER PROCESSES")
+    print(f"{'='*80}\n")
+    
+    workers = []
+    for i in range(num_processes):
+        worker = Process(target=worker_process, args=(i, task_queue, result_queue))
+        worker.start()
+        workers.append(worker)
+    
+    # Wait for all workers to complete
+    for worker in workers:
+        worker.join()
+    
+    print(f"\n{'='*80}")
+    print("ALL WORKERS COMPLETED")
+    print(f"{'='*80}\n")
+    
+    # Collect results from queue
+    results = []
+    while not result_queue.empty():
+        results.append(result_queue.get())
     
     # Write results to log file
     print(f"\n{'='*80}")
@@ -156,6 +211,30 @@ def process_desktop_media(num_processes: int = 8):
     print(f"✓ Log file written to: {log_file}")
     print(f"\nProcessing complete!")
     print(f"  - Total files processed: {len(results)}")
+    
+    # Group files if requested
+    if group_files:
+        print(f"\n{'='*80}")
+        print("GROUPING FILES BY SIMILARITY")
+        print(f"{'='*80}\n")
+        
+        from file_grouper import FileGrouper
+        
+        # Filter successful results
+        successful_results = [r for r in results if r.get('success', False)]
+        
+        if successful_results:
+            grouper = FileGrouper()
+            groups = grouper.group_files(successful_results, min_cluster_size=2)
+            
+            # Save groups to JSON
+            groups_file = desktop_path / f"file_groups_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            grouper.save_groups(groups, groups_file)
+            
+            # Print summary
+            grouper.print_groups(groups)
+        else:
+            print("No successful results to group.")
 
 
 if __name__ == '__main__':
@@ -168,6 +247,11 @@ if __name__ == '__main__':
         default=8,
         help='Number of parallel processes to use (default: 8)'
     )
+    parser.add_argument(
+        '-g', '--group',
+        action='store_true',
+        help='Group files by semantic similarity after processing'
+    )
     
     args = parser.parse_args()
-    process_desktop_media(num_processes=args.processes)
+    process_desktop_media(num_processes=args.processes, group_files=args.group)
