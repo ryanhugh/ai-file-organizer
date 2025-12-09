@@ -65,7 +65,8 @@ class FileOrganizer:
         
         self.extractor = FileExtractor(
             transcribe_videos=transcribe_videos,
-            video_transcriber=video_transcriber
+            video_transcriber=video_transcriber,
+            llm_client=self.categorizer.client
         )
         self.project_manager = ProjectManager(output_dir)
         
