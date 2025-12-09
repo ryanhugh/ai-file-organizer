@@ -16,20 +16,14 @@ from typing import Optional, Dict
 from filelock import FileLock
 
 from utils import find_project_root
+from llm_client import get_llm_client
 
 
 class SummaryGenerator:
     """Generate summaries using LLM with caching."""
     
-    def __init__(self, llm_client=None):
-        """
-        Initialize the summary generator.
-        
-        Args:
-            llm_client: Ollama client for generating summaries
-        """
-        self.llm_client = llm_client
-        
+    def __init__(self):
+        """Initialize the summary generator."""
         # Set up cache file path
         cache_dir = find_project_root() / '.cache'
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -111,31 +105,26 @@ class SummaryGenerator:
         Returns:
             Generated summary text
         """
-        if not self.llm_client:
-            return ""
+        # Generate cache key from prompt
+        cache_key = self._get_cache_key(prompt)
         
-        if not prompt or not prompt.strip():
-            return ""
+        # Check cache first
+        cached_summary = self._read_cache(cache_key)
+        if cached_summary is not None:
+            print("  ✓ Using cached summary")
+            return cached_summary
         
+        # Generate new summary if not in cache
         try:
-            # Step 1: Generate cache key from the complete prompt
-            cache_key = self._get_cache_key(prompt)
-            
-            # Step 2: Check cache - if exists, return and exit early
-            cached_summary = self._read_cache(cache_key)
-            if cached_summary is not None:
-                print(f"  ✓ Using cached summary")
-                return cached_summary
-            
-            # Step 3: Run the LLM to generate output
-            response = self.llm_client.generate(
+            llm_client = get_llm_client()
+            response = llm_client.generate(
                 model='llama3.2:3b',
                 prompt=prompt
             )
             
             summary = response['response'].strip()
             
-            # Step 4: Store in cache
+            # Cache the result
             self._write_cache(cache_key, summary)
             
             return summary

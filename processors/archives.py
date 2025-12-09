@@ -338,13 +338,10 @@ if __name__ == '__main__':
     # Test archive processor
     import sys
     from pathlib import Path
-    import ollama
+    from llm_client import get_llm_client
     
     # Initialize processor
     processor = ArchiveProcessor()
-    
-    # Initialize LLM client
-    llm_client = ollama.Client()
     
     # Initialize other processors for deep processing
     from processors.images import ImageProcessor
@@ -353,8 +350,8 @@ if __name__ == '__main__':
     from processors.text import TextProcessor
     
     processor.other_processors = {
-        'image': ImageProcessor(llm_client=llm_client),
-        'video': VideoTranscriber(model_size="base", enable_ocr=True, frame_interval=5, llm_client=llm_client),
+        'image': ImageProcessor(),
+        'video': VideoTranscriber(model_size="base", enable_ocr=True, frame_interval=5),
         'document': DocumentProcessor(),
         'text': TextProcessor()
     }
@@ -373,5 +370,5 @@ if __name__ == '__main__':
     print(f"Testing ArchiveProcessor with: {test_path.name}")
     print("=" * 80)
     
-    result = processor.process(test_path, llm_client)
+    result = processor.process(test_path, get_llm_client())
     print(result)

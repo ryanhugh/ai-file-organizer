@@ -21,6 +21,7 @@ from PIL.ExifTags import TAGS
 from processors.base import MediaProcessor
 from processors.summary import SummaryGenerator
 from processors.cache import FileCache
+from llm_client import get_llm_client
 
 
 class ImageProcessor(MediaProcessor):
@@ -29,18 +30,12 @@ class ImageProcessor(MediaProcessor):
     # Supported image file extensions
     SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.heic', '.heif'}
     
-    def __init__(self, llm_client=None):
-        """
-        Initialize the image processor with OCR enabled.
-        
-        Args:
-            llm_client: Ollama client for generating summaries
-        """
+    def __init__(self):
+        """Initialize the image processor with OCR enabled."""
         print("Initializing EasyOCR for image text extraction...")
         # Initialize EasyOCR with English support
         self.ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-        self.llm_client = llm_client
-        self.summary_generator = SummaryGenerator(llm_client=llm_client)
+        self.summary_generator = SummaryGenerator()
         self.ocr_cache = FileCache('ocr')
         print("OCR enabled for image processing")
     
@@ -244,21 +239,18 @@ Summary:"""
 
 if __name__ == '__main__':
     # Test the image processor
-    import ollama
     
     # NOTE this file name has some odd character in it just before PM. THis character is not a normal space. 
-    # image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-11-08 at 3.30.59 PM.png')
-    # image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-11-05 at 11.14.04 AM.png')
-    image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-10-22 at 8.54.40 PM.png')
+    # image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-11-08 at 3.30.59 PM.png')
+    # image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-11-05 at 11.14.04 AM.png')
+    image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-10-22 at 8.54.40 PM.png')
     if not image_path.exists():
         print(f"Error: File not found: {image_path}")
         print("Please update the path in the script or provide a valid image path")
         sys.exit(1)
     
-    # Initialize with LLM client for summary generation
-    print("Initializing Ollama client...")
-    llm_client = ollama.Client()
-    processor = ImageProcessor(llm_client=llm_client)
+    # Initialize processor (LLM client is auto-initialized on first use)
+    processor = ImageProcessor()
     
     print(f"Processing: {image_path.name}")
     print("=" * 50)

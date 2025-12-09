@@ -24,6 +24,7 @@ from processors.base import MediaProcessor
 from processors.images import ImageProcessor
 from processors.summary import SummaryGenerator
 from processors.cache import FileCache
+from llm_client import get_llm_client
 
 
 class VideoTranscriber(MediaProcessor):
@@ -32,7 +33,7 @@ class VideoTranscriber(MediaProcessor):
     # Supported video file extensions
     SUPPORTED_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.m4v'}
     
-    def __init__(self, model_size: str = "base", enable_ocr: bool = True, frame_interval: int = 5, llm_client=None):
+    def __init__(self, model_size: str = "base", enable_ocr: bool = True, frame_interval: int = 5):
         """
         Initialize the transcriber.
         
@@ -44,7 +45,6 @@ class VideoTranscriber(MediaProcessor):
                        - medium/large: Best accuracy, much slower
             enable_ocr: Whether to extract and OCR video frames
             frame_interval: Extract one frame every N seconds for OCR
-            llm_client: Ollama client for generating summaries
         """
         print(f"Loading Whisper model '{model_size}'...")
         self.model = whisper.load_model(model_size)
@@ -53,8 +53,7 @@ class VideoTranscriber(MediaProcessor):
         self.enable_ocr = enable_ocr
         self.frame_interval = frame_interval
         self.image_processor = None
-        self.llm_client = llm_client
-        self.summary_generator = SummaryGenerator(llm_client=llm_client)
+        self.summary_generator = SummaryGenerator()
         self.transcription_cache = FileCache('transcription')
         
         if enable_ocr:
@@ -194,7 +193,7 @@ class VideoTranscriber(MediaProcessor):
             # Extract and OCR frames if enabled
             ocr_text = ""
             if self.enable_ocr:
-                ocr_text = self._extract_and_ocr_frames(video_path, max_duration)
+                ocr_text = self._extract_and_ocr_frames(video_path)
                 if ocr_text:
                     print(f"  🖼️  OCR Text from Video Frames:")
                     print(f"  {'-' * 70}")
@@ -247,14 +246,13 @@ class VideoTranscriber(MediaProcessor):
                 'success': False
             }
     
-    def _extract_audio(self, video_path: Path, output_path: str, max_duration: int):
+    def _extract_audio(self, video_path: Path, output_path: str):
         """Extract audio from video using ffmpeg."""
         try:
             # Use ffmpeg to extract audio
             cmd = [
                 'ffmpeg',
                 '-i', str(video_path),
-                '-t', str(max_duration),  # Limit duration
                 '-vn',  # No video
                 '-acodec', 'pcm_s16le',  # PCM audio
                 '-ar', '16000',  # 16kHz sample rate (Whisper requirement)
@@ -356,13 +354,12 @@ class VideoTranscriber(MediaProcessor):
                 'error': str(e)
             }
     
-    def _extract_and_ocr_frames(self, video_path: Path, max_duration: int = 300) -> str:
+    def _extract_and_ocr_frames(self, video_path: Path) -> str:
         """
         Extract frames from video and perform OCR on them using ffmpeg.
         
         Args:
             video_path: Path to video file
-            max_duration: Maximum duration to process in seconds
             
         Returns:
             Combined OCR text from all frames
@@ -371,22 +368,19 @@ class VideoTranscriber(MediaProcessor):
             return ""
         
         try:
-            print(f"  Extracting frames for OCR...")
-            
-            # Create temp directory for frames
-            temp_dir = tempfile.mkdtemp()
-            
-            # Use ffmpeg to extract frames at intervals
-            # Extract 1 frame every N seconds
-            cmd = [
-                'ffmpeg',
-                '-i', str(video_path),
-                '-t', str(max_duration),  # Limit duration
-                '-vf', f'fps=1/{self.frame_interval}',  # 1 frame every N seconds
-                '-q:v', '2',  # High quality
-                '-f', 'image2',
-                f'{temp_dir}/frame_%04d.jpg'
-            ]
+            # Create temporary directory for frames
+            with tempfile.TemporaryDirectory() as temp_dir:
+                frame_pattern = str(Path(temp_dir) / 'frame_%04d.jpg')
+                
+                # Extract frames using ffmpeg
+                cmd = [
+                    'ffmpeg',
+                    '-i', str(video_path),
+                    '-vf', f'fps=1/{self.frame_interval}',  # 1 frame every N seconds
+                    '-q:v', '2',  # High quality
+                    '-f', 'image2',
+                    frame_pattern
+                ]
             
             # Run ffmpeg
             result = subprocess.run(

@@ -6,7 +6,6 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 from multiprocessing import Pool
-import ollama
 from processors.images import ImageProcessor
 from processors.videos import VideoTranscriber
 from processors.cache import cleanup_cache_locks
@@ -24,20 +23,16 @@ def process_single_file(file_path_str: str) -> dict:
     """
     file_path = Path(file_path_str)
     
-    # Each process creates its own processor instances and LLM client
-    llm_client = ollama.Client()
-    
     # Determine file type and create appropriate processor
     ext = file_path.suffix.lower()
     
     if ext in ImageProcessor.SUPPORTED_EXTENSIONS:
-        processor = ImageProcessor(llm_client=llm_client)
+        processor = ImageProcessor()
     elif ext in VideoTranscriber.SUPPORTED_EXTENSIONS:
         processor = VideoTranscriber(
             model_size="base",
             enable_ocr=True,
-            frame_interval=5,
-            llm_client=llm_client
+            frame_interval=5
         )
     else:
         return {
