@@ -8,12 +8,15 @@ from datetime import datetime
 from multiprocessing import Pool
 from processors.images import ImageProcessor
 from processors.videos import VideoTranscriber
+from processors.documents import DocumentProcessor
+from processors.text import TextProcessor
+from processors.archives import ArchiveProcessor
 from processors.cache import cleanup_cache_locks
 
 
 def process_single_file(file_path_str: str) -> dict:
     """
-    Process a single media file (called by worker process).
+    Process a single file (called by worker process).
     
     Args:
         file_path_str: String path to the file
@@ -34,6 +37,12 @@ def process_single_file(file_path_str: str) -> dict:
             enable_ocr=True,
             frame_interval=5
         )
+    elif ext in DocumentProcessor.SUPPORTED_EXTENSIONS:
+        processor = DocumentProcessor()
+    elif ext in TextProcessor.SUPPORTED_EXTENSIONS:
+        processor = TextProcessor()
+    elif ext in ArchiveProcessor.SUPPORTED_EXTENSIONS:
+        processor = ArchiveProcessor()
     else:
         return {
             'filename': file_path.name,
@@ -88,9 +97,15 @@ def process_desktop_media(num_processes: int = 8):
     print()
     cleanup_cache_locks()
     
-    # Find all media files
-    print(f"\nScanning {desktop_path} for media files...")
-    supported_extensions = ImageProcessor.SUPPORTED_EXTENSIONS | VideoTranscriber.SUPPORTED_EXTENSIONS
+    # Find all supported files
+    print(f"\nScanning {desktop_path} for supported files...")
+    supported_extensions = (
+        ImageProcessor.SUPPORTED_EXTENSIONS | 
+        VideoTranscriber.SUPPORTED_EXTENSIONS |
+        DocumentProcessor.SUPPORTED_EXTENSIONS |
+        TextProcessor.SUPPORTED_EXTENSIONS |
+        ArchiveProcessor.SUPPORTED_EXTENSIONS
+    )
     media_files = []
     
     for file_path in desktop_path.iterdir():
