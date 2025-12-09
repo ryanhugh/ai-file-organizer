@@ -2,12 +2,14 @@
 """
 Process all media files on Desktop and generate summaries.
 """
+import argparse
 from pathlib import Path
 from datetime import datetime
 from multiprocessing import Pool
 import ollama
 from processors.images import ImageProcessor
 from processors.videos import VideoTranscriber
+from processors.cache import cleanup_cache_locks
 
 
 def process_single_file(file_path_str: str) -> dict:
@@ -72,9 +74,13 @@ def process_single_file(file_path_str: str) -> dict:
         }
 
 
-def process_desktop_media():
-    """Process all media files on Desktop."""
+def process_desktop_media(num_processes: int = 8):
+    """
+    Process all media files on Desktop.
     
+    Args:
+        num_processes: Number of parallel processes to use (default: 8)
+    """
     # Setup paths
     desktop_path = Path.home() / "Desktop"
     log_file = desktop_path / f"media_summaries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
@@ -82,6 +88,10 @@ def process_desktop_media():
     print(f"Processing media files in: {desktop_path}")
     print(f"Log file will be saved to: {log_file}")
     print("=" * 80)
+    
+    # Clean up stale lock files from previous runs
+    print()
+    cleanup_cache_locks()
     
     # Find all media files
     print(f"\nScanning {desktop_path} for media files...")
@@ -101,16 +111,16 @@ def process_desktop_media():
         print("\nNo media files to process.")
         return
     
-    # Process files in parallel with 8 processes
+    # Process files in parallel
     print(f"\n{'='*80}")
-    print(f"PROCESSING {len(media_files)} FILES WITH 8 PROCESSES")
+    print(f"PROCESSING {len(media_files)} FILES WITH {num_processes} PROCESSES")
     print(f"{'='*80}\n")
     
     # Convert paths to strings for multiprocessing
     file_paths_str = [str(f) for f in media_files]
     
-    # Use multiprocessing Pool with 8 workers
-    with Pool(processes=8) as pool:
+    # Use multiprocessing Pool
+    with Pool(processes=num_processes) as pool:
         results = pool.map(process_single_file, file_paths_str)
     
     # Filter out None results
@@ -139,4 +149,15 @@ def process_desktop_media():
 
 
 if __name__ == '__main__':
-    process_desktop_media()
+    parser = argparse.ArgumentParser(
+        description='Process all media files on Desktop and generate summaries.'
+    )
+    parser.add_argument(
+        '-p', '--processes',
+        type=int,
+        default=8,
+        help='Number of parallel processes to use (default: 8)'
+    )
+    
+    args = parser.parse_args()
+    process_desktop_media(num_processes=args.processes)

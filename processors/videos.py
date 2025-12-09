@@ -23,6 +23,7 @@ import whisper
 from processors.base import MediaProcessor
 from processors.images import ImageProcessor
 from processors.summary import SummaryGenerator
+from processors.cache import FileCache
 
 
 class VideoTranscriber(MediaProcessor):
@@ -54,6 +55,7 @@ class VideoTranscriber(MediaProcessor):
         self.image_processor = None
         self.llm_client = llm_client
         self.summary_generator = SummaryGenerator(llm_client=llm_client)
+        self.transcription_cache = FileCache('transcription')
         
         if enable_ocr:
             print(f"Initializing ImageProcessor")
@@ -61,19 +63,18 @@ class VideoTranscriber(MediaProcessor):
             self.image_processor = ImageProcessor()
             print(f"OCR enabled: extracting frames every {frame_interval} seconds")
         
-    def process(self, file_path: Path, max_duration: int = 300) -> Dict[str, Any]:
+    def process(self, file_path: Path) -> Dict[str, Any]:
         """
         Process a video file with transcription, OCR, and summary generation.
         
         Args:
             file_path: Path to video file
-            max_duration: Maximum duration to process in seconds (default: 5 minutes)
             
         Returns:
             Dictionary with success status and summary
         """
         try:
-            result = self._transcribe_video(file_path, max_duration)
+            result = self._transcribe_video(file_path)
             
             if not result['success']:
                 return {
@@ -109,24 +110,70 @@ class VideoTranscriber(MediaProcessor):
                 'error': str(e)
             }
     
-    def _transcribe_video(self, video_path: Path, max_duration: int = 300) -> Dict[str, Any]:
+    def _transcribe_video(self, video_path: Path) -> Dict[str, Any]:
         """
         Transcribe audio from a video file.
         
         Args:
             video_path: Path to video file
-            max_duration: Maximum duration to transcribe in seconds (default: 5 minutes)
             
         Returns:
             Dictionary with transcription and metadata
         """
         try:
+            # Check transcription cache first
+            file_hash = self.transcription_cache.get_file_hash(video_path)
+            cached_result = self.transcription_cache.get(file_hash)
+            
+            if cached_result is not None:
+                print(f"  ✓ Using cached transcription for {video_path.name}")
+                # Parse cached JSON result
+                cached_data = json.loads(cached_result)
+                
+                transcription_text = cached_data['audio_transcription']
+                ocr_text = cached_data.get('ocr_text', '')
+                
+                # Print cached transcription
+                print(f"\n  📝 Audio Transcription for {video_path.name} (cached):")
+                print(f"  {'-' * 70}")
+                print(f"  {transcription_text}")
+                print(f"  {'-' * 70}\n")
+                
+                if ocr_text:
+                    print(f"  🖼️  OCR Text from Video Frames (cached):")
+                    print(f"  {'-' * 70}")
+                    print(f"  {ocr_text}")
+                    print(f"  {'-' * 70}\n")
+                
+                # Generate summary (not cached, as it depends on LLM prompt)
+                summary = self._generate_summary(video_path.name, transcription_text, ocr_text)
+                if summary:
+                    print(f"  📋 Summary:")
+                    print(f"  {'-' * 70}")
+                    print(f"  {summary}")
+                    print(f"  {'-' * 70}\n")
+                
+                combined_text = transcription_text
+                if ocr_text:
+                    combined_text = f"{transcription_text}\n\n[Screen Text from Video]:\n{ocr_text}"
+                
+                return {
+                    'text': combined_text,
+                    'summary': summary,
+                    'audio_transcription': transcription_text,
+                    'ocr_text': ocr_text,
+                    'language': cached_data.get('language', 'en'),
+                    'segments': cached_data.get('segments', 0),
+                    'success': True
+                }
+            
+            # Not in cache - perform transcription
             # Extract audio to temporary file
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
                 temp_audio_path = temp_audio.name
             
             # Extract audio using ffmpeg (first N seconds)
-            self._extract_audio(video_path, temp_audio_path, max_duration)
+            self._extract_audio(video_path, temp_audio_path)
             
             # Transcribe
             print(f"  Transcribing: {video_path.name}...")
@@ -172,6 +219,15 @@ class VideoTranscriber(MediaProcessor):
                 os.unlink(temp_audio_path)
             except:
                 pass
+            
+            # Cache the transcription result (without summary, as it depends on prompt)
+            cache_data = {
+                'audio_transcription': transcription_text,
+                'ocr_text': ocr_text,
+                'language': result.get('language', 'en'),
+                'segments': len(result.get('segments', []))
+            }
+            self.transcription_cache.set(file_hash, json.dumps(cache_data))
             
             return {
                 'text': combined_text,

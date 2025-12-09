@@ -20,6 +20,7 @@ from PIL.ExifTags import TAGS
 
 from processors.base import MediaProcessor
 from processors.summary import SummaryGenerator
+from processors.cache import FileCache
 
 
 class ImageProcessor(MediaProcessor):
@@ -40,6 +41,7 @@ class ImageProcessor(MediaProcessor):
         self.ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
         self.llm_client = llm_client
         self.summary_generator = SummaryGenerator(llm_client=llm_client)
+        self.ocr_cache = FileCache('ocr')
         print("OCR enabled for image processing")
     
     def _get_metadata(self, file_path: Path) -> str:
@@ -77,17 +79,27 @@ class ImageProcessor(MediaProcessor):
             Dictionary with success status and summary
         """
         try:
-            # Read image with OpenCV
-            frame = cv2.imread(str(file_path))
-            if frame is None:
-                return {
-                    'success': False,
-                    'summary': '',
-                    'error': 'Failed to read image file'
-                }
+            # Check OCR cache first
+            file_hash = self.ocr_cache.get_file_hash(file_path)
+            ocr_text = self.ocr_cache.get(file_hash)
             
-            # Perform OCR
-            ocr_text = self.ocr_frame(frame)
+            if ocr_text is not None:
+                print(f"  ✓ Using cached OCR for {file_path.name}")
+            else:
+                # Read image with OpenCV
+                frame = cv2.imread(str(file_path))
+                if frame is None:
+                    return {
+                        'success': False,
+                        'summary': '',
+                        'error': 'Failed to read image file'
+                    }
+                
+                # Perform OCR
+                ocr_text = self.ocr_frame(frame)
+                
+                # Cache the OCR result
+                self.ocr_cache.set(file_hash, ocr_text)
             
             # Print the OCR text
             if ocr_text:

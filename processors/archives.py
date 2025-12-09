@@ -1,6 +1,12 @@
 """
 Archive file processor (zip, tar, etc.)
 """
+
+try:
+    from . import _import_fix
+except ImportError:
+    import _import_fix
+
 from pathlib import Path
 import zipfile
 import tarfile
@@ -87,6 +93,8 @@ class ArchiveProcessor:
             should_deep_process = self._should_deep_process(
                 len(actual_files), has_folders, has_nested_archives, file_types, llm_client
             )
+
+            print(f"Should deep process: {should_deep_process}, {file_types}")
             
             # Build description
             description = f"Archive file: {file_path.name}\n"
@@ -118,22 +126,29 @@ class ArchiveProcessor:
                             with open(extracted_path, 'wb') as f:
                                 f.write(zf.read(file_name))
                             
-                            # Process based on file type
+                            # Process based on file type using the unified process() method
                             file_ext = extracted_path.suffix.lower()
-                            content = None
+                            result = None
                             
-                            if file_ext in ['.txt', '.md', '.log', '.py', '.js', '.html', '.css', '.json', '.csv']:
-                                content = self.other_processors['text'].process(extracted_path)
-                            elif file_ext == '.pdf':
-                                content = self.other_processors['doc'].process_pdf(extracted_path)
-                            elif file_ext in ['.docx', '.doc']:
-                                content = self.other_processors['doc'].process_docx(extracted_path)
-                            elif file_ext in ['.xlsx', '.xls']:
-                                content = self.other_processors['doc'].process_excel(extracted_path)
+                            # Determine which processor to use
+                            if file_ext in self.other_processors['text'].SUPPORTED_EXTENSIONS:
+                                result = self.other_processors['text'].process(extracted_path)
+                            elif file_ext in self.other_processors['document'].SUPPORTED_EXTENSIONS:
+                                result = self.other_processors['document'].process(extracted_path)
+                            elif file_ext in self.other_processors['image'].SUPPORTED_EXTENSIONS:
+                                result = self.other_processors['image'].process(extracted_path)
+                            elif file_ext in self.other_processors['video'].SUPPORTED_EXTENSIONS:
+                                result = self.other_processors['video'].process(extracted_path)
                             
-                            if content and len(content.strip()) > 0:
-                                extracted_content.append(f"\n--- {file_name} ---\n{content[:800]}")
+                            # Extract summary from result
+                            if result and result.get('success'):
+                                content = result['summary']
+                                if content and len(content.strip()) > 0:
+                                    # Truncate long content but keep full summary for images/videos
+                                    preview = content[:1000] if len(content) > 1000 else content
+                                    extracted_content.append(f"\n--- {file_name} ---\n{preview}")
                         except Exception as e:
+                            print(f"Error processing {file_name}: {e}")
                             pass
                 
                 if extracted_content:
@@ -152,7 +167,8 @@ class ArchiveProcessor:
                         content = zf.read(text_file).decode('utf-8', errors='ignore')
                         if content.strip():
                             extracted_content.append(f"\n--- Content of {text_file} ---\n{content[:1000]}")
-                    except:
+                    except Exception as e:
+                        print (e)
                         pass
                 
                 if extracted_content:
@@ -320,12 +336,42 @@ Summary:"""
 
 if __name__ == '__main__':
     # Test archive processor
+    import sys
     from pathlib import Path
     import ollama
     
+    # Initialize processor
     processor = ArchiveProcessor()
-    test_path = Path("/Users/ryanhughes/Desktop/file-organizer-test/a zip file.zip")
     
-    if test_path.exists():
-        result = processor.process(test_path, ollama)
-        print(result)
+    # Initialize LLM client
+    llm_client = ollama.Client()
+    
+    # Initialize other processors for deep processing
+    from processors.images import ImageProcessor
+    from processors.videos import VideoTranscriber
+    from processors.documents import DocumentProcessor
+    from processors.text import TextProcessor
+    
+    processor.other_processors = {
+        'image': ImageProcessor(llm_client=llm_client),
+        'video': VideoTranscriber(model_size="base", enable_ocr=True, frame_interval=5, llm_client=llm_client),
+        'document': DocumentProcessor(),
+        'text': TextProcessor()
+    }
+    
+    # Test with a file path from command line or use default
+    if len(sys.argv) > 1:
+        test_path = Path(sys.argv[1])
+    else:
+        test_path = Path("/Users/ryanhughes/Desktop/file-organizer-test/a zip file.zip")
+    
+    if not test_path.exists():
+        print(f"Error: File not found: {test_path}")
+        print("Usage: python archives.py <archive_file>")
+        sys.exit(1)
+    
+    print(f"Testing ArchiveProcessor with: {test_path.name}")
+    print("=" * 80)
+    
+    result = processor.process(test_path, llm_client)
+    print(result)
