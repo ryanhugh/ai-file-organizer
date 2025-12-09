@@ -39,3 +39,7 @@ Thumbs.db
 # Test outputs
 test_output/
 Organized/
+
+
+*.log
+.cache

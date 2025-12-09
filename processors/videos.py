@@ -1,26 +1,21 @@
 """
 Video and audio transcription module using Whisper and OCR.
 """
+import glob
+import json
 import os
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-import subprocess
-
-try:
-    import whisper
-    WHISPER_AVAILABLE = True
-except ImportError:
-    WHISPER_AVAILABLE = False
-
-try:
-    import ffmpeg
-    FFMPEG_AVAILABLE = True
-except ImportError:
-    FFMPEG_AVAILABLE = False
 
 import cv2
+import ffmpeg
+import whisper
+
 from .images import ImageProcessor
+from .summary import SummaryGenerator
 
 
 class VideoTranscriber:
@@ -40,12 +35,6 @@ class VideoTranscriber:
             frame_interval: Extract one frame every N seconds for OCR
             llm_client: Ollama client for generating summaries
         """
-        if not WHISPER_AVAILABLE:
-            raise ImportError(
-                "Whisper not installed. Install with: pip install openai-whisper\n"
-                "Also requires ffmpeg: brew install ffmpeg"
-            )
-        
         print(f"Loading Whisper model '{model_size}'...")
         self.model = whisper.load_model(model_size)
         print(f"Whisper model loaded!")
@@ -54,6 +43,7 @@ class VideoTranscriber:
         self.frame_interval = frame_interval
         self.image_processor = None
         self.llm_client = llm_client
+        self.summary_generator = SummaryGenerator(llm_client=llm_client)
         
         if enable_ocr:
             print(f"Initializing ImageProcessor")
@@ -234,7 +224,6 @@ class VideoTranscriber:
                 check=True
             )
             
-            import json
             data = json.loads(result.stdout)
             
             # Extract useful info
@@ -271,7 +260,6 @@ class VideoTranscriber:
             print(f"  Extracting frames for OCR...")
             
             # Create temp directory for frames
-            import tempfile
             temp_dir = tempfile.mkdtemp()
             
             # Use ffmpeg to extract frames at intervals
@@ -298,7 +286,6 @@ class VideoTranscriber:
                 print(f"  Warning: ffmpeg frame extraction had issues")
             
             # Read and OCR extracted frames
-            import glob
             frame_files = sorted(glob.glob(f'{temp_dir}/frame_*.jpg'))
             
             print(f"  Found {len(frame_files)} frames to process")
@@ -334,7 +321,6 @@ class VideoTranscriber:
                         prev_text_hash = text_hash
             
             # Clean up temp files
-            import shutil
             try:
                 shutil.rmtree(temp_dir)
             except:
@@ -374,37 +360,22 @@ class VideoTranscriber:
         Returns:
             One paragraph summary
         """
-        if not self.llm_client:
-            return ""
+        # Build context for the LLM
+        context_parts = [f"Video file: {filename}"]
         
-        try:
-            # Build context for the LLM
-            context_parts = [f"Video file: {filename}"]
-            
-            if audio_text:
-                context_parts.append(f"\nAudio transcription:\n{audio_text[:1000]}")  # Limit to first 1000 chars
-            
-            if ocr_text:
-                context_parts.append(f"\nText visible on screen:\n{ocr_text[:1000]}")  # Limit to first 1000 chars
-            
-            context = "\n".join(context_parts)
-            
-            # Create prompt for summary
-            prompt = f"""Based on the following video content, write a single concise paragraph (2-3 sentences) describing what this video is about. Focus on the main topic, what's being shown/discussed, and any key technical details.
+        if audio_text:
+            context_parts.append(f"\nAudio transcription:\n{audio_text[:1000]}")  # Limit to first 1000 chars
+        
+        if ocr_text:
+            context_parts.append(f"\nText visible on screen:\n{ocr_text[:1000]}")  # Limit to first 1000 chars
+        
+        context = "\n".join(context_parts)
+        
+        # Create prompt for summary
+        prompt = f"""Based on the following video content, write a single concise paragraph (2-3 sentences) describing what this video is about. Focus on the main topic, what's being shown/discussed, and any key technical details.
 
 {context}
 
 Summary:"""
-            
-            # Generate summary using Ollama
-            response = self.llm_client.generate(
-                model='llama3.2:3b',  # Use the same model
-                prompt=prompt
-            )
-            
-            summary = response['response'].strip()
-            return summary
-            
-        except Exception as e:
-            print(f"  Warning: Could not generate summary: {str(e)}")
-            return ""
+        
+        return self.summary_generator.generate(prompt)

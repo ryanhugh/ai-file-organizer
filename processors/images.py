@@ -1,38 +1,39 @@
 """
 Image file processor.
 """
+import sys
 from pathlib import Path
 from typing import Dict, Any, Optional
+
+import cv2
+import easyocr
 import numpy as np
 
-try:
-    from PIL import Image
-    from PIL.ExifTags import TAGS
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
+from PIL import Image
+from PIL.ExifTags import TAGS
 
-import easyocr
-import cv2
+from .summary import SummaryGenerator
 
 
 class ImageProcessor:
     """Process image files."""
     
-    def __init__(self):
+    def __init__(self, llm_client=None):
         """
         Initialize the image processor with OCR enabled.
+        
+        Args:
+            llm_client: Ollama client for generating summaries
         """
         print("Initializing EasyOCR for image text extraction...")
         # Initialize EasyOCR with English support
         self.ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+        self.llm_client = llm_client
+        self.summary_generator = SummaryGenerator(llm_client=llm_client)
         print("OCR enabled for image processing")
     
     def process(self, file_path: Path) -> Dict[str, Any]:
         """Extract metadata from image files."""
-        if not PIL_AVAILABLE:
-            return {'error': 'PIL not available'}
-        
         try:
             with Image.open(file_path) as img:
                 metadata = {
@@ -61,27 +62,48 @@ class ImageProcessor:
         
         return f"Image file: {file_path.name}, {metadata.get('dimensions', 'unknown dimensions')}"
     
-    def ocr_image(self, image_path: Path) -> str:
+    def ocr_image(self, image_path: Path) -> Dict[str, Any]:
         """
-        Perform OCR on a single image file.
+        Perform OCR on a single image file and generate a summary.
         
         Args:
             image_path: Path to image file
             
         Returns:
-            Extracted and cleaned text
+            Dictionary with OCR text and summary
         """
         try:
             # Read image with OpenCV
             frame = cv2.imread(str(image_path))
             if frame is None:
-                return ""
+                return {'text': '', 'summary': '', 'success': False}
             
-            return self.ocr_frame(frame)
+            ocr_text = self.ocr_frame(frame)
+            
+            # Print the OCR text
+            if ocr_text:
+                print(f"\n  📝 OCR Text from {image_path.name}:")
+                print(f"  {'-' * 70}")
+                print(f"  {ocr_text}")
+                print(f"  {'-' * 70}\n")
+            
+            # Generate summary
+            summary = self._generate_summary(image_path.name, ocr_text)
+            if summary:
+                print(f"  📋 Summary:")
+                print(f"  {'-' * 70}")
+                print(f"  {summary}")
+                print(f"  {'-' * 70}\n")
+            
+            return {
+                'text': ocr_text,
+                'summary': summary,
+                'success': True
+            }
             
         except Exception as e:
             print(f"  Error performing OCR on {image_path.name}: {str(e)}")
-            return ""
+            return {'text': '', 'summary': '', 'error': str(e), 'success': False}
     
     def ocr_frame(self, frame: np.ndarray) -> str:
         """
@@ -148,12 +170,39 @@ class ImageProcessor:
             cleaned_lines.append(line)
         
         return '\n'.join(cleaned_lines)
+    
+    def _generate_summary(self, filename: str, ocr_text: str) -> str:
+        """
+        Generate a concise summary of the image content using LLM.
+        
+        Args:
+            filename: Name of the image file
+            ocr_text: OCR text from the image
+            
+        Returns:
+            One paragraph summary
+        """
+        if not ocr_text or not ocr_text.strip():
+            return ""
+        
+        # Build context for the LLM
+        context = f"""Image file: {filename}
+
+Text visible in image:
+{ocr_text[:1000]}"""
+        
+        # Create prompt for summary
+        prompt = f"""Based on the following image content, write a single concise paragraph (2-3 sentences) describing what this image is about. Focus on the main topic, what's being shown, and any key information.
+
+{context}
+
+Summary:"""
+        
+        return self.summary_generator.generate(prompt)
 
 
 if __name__ == '__main__':
     # Test the image processor
-    import sys
-    
     # if len(sys.argv) < 2:
     #     print("Usage: python processors/images.py '/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-11-08 at 3.30.59 PM.png'")
     #     sys.exit(1)
@@ -173,6 +222,10 @@ if __name__ == '__main__':
     print(f"Metadata: {metadata}")
     
     # Perform OCR
-    text = processor.ocr_image(image_path)
-    print(f"\nOCR Text:\n{'-' * 50}")
-    print(text if text else "(No text detected)")
+    result = processor.ocr_image(image_path)
+    if result['success']:
+        print(f"\nOCR Result:")
+        print(f"Text: {result['text'] if result['text'] else '(No text detected)'}")
+        print(f"Summary: {result['summary'] if result['summary'] else '(No summary generated)'}")
+    else:
+        print(f"Error: {result.get('error', 'Unknown error')}")
