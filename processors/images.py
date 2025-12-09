@@ -108,6 +108,8 @@ class ImageProcessor(MediaProcessor):
             if metadata:
                 final_summary += f"\n\nMetadata: {metadata}"
             
+            final_summary += f"\n\nFilename: {file_path.name}"
+            
             if summary:
                 print(f"  📋 Summary:")
                 print(f"  {'-' * 70}")
@@ -215,6 +217,9 @@ Text visible in image:
         
         # Create prompt for summary
         prompt = f"""Based on the following text extracted from an image, write a single concise paragraph (2-3 sentences) describing what this image is about. Focus on the main topic, what's being shown, and any key information (eg proper names, dates, etc).
+        Super important to keep proper names and dates, including S3 bucket names. 
+
+        DO not say "This image appears to be a screenshot of " or any other filler text just get right to the point. eg "An image of a child process..."
 
 {context}
 
@@ -230,7 +235,9 @@ if __name__ == '__main__':
     import ollama
     
     # NOTE this file name has some odd character in it just before PM. THis character is not a normal space. 
-    image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-11-08 at 3.30.59 PM.png')
+    # image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-11-08 at 3.30.59 PM.png')
+    # image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-11-05 at 11.14.04 AM.png')
+    image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-10-22 at 8.54.40 PM.png')
     if not image_path.exists():
         print(f"Error: File not found: {image_path}")
         print("Please update the path in the script or provide a valid image path")
