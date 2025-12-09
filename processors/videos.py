@@ -1,6 +1,12 @@
 """
 Video and audio transcription module using Whisper and OCR.
 """
+# Import fix must be first - enables running as both module and script
+try:
+    from . import _import_fix
+except ImportError:
+    import _import_fix
+
 import glob
 import json
 import os
@@ -14,12 +20,16 @@ import cv2
 import ffmpeg
 import whisper
 
-from .images import ImageProcessor
-from .summary import SummaryGenerator
+from processors.base import MediaProcessor
+from processors.images import ImageProcessor
+from processors.summary import SummaryGenerator
 
 
-class VideoTranscriber:
+class VideoTranscriber(MediaProcessor):
     """Transcribe audio from video and audio files using Whisper and OCR."""
+    
+    # Supported video file extensions
+    SUPPORTED_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.m4v'}
     
     def __init__(self, model_size: str = "base", enable_ocr: bool = True, frame_interval: int = 5, llm_client=None):
         """
@@ -51,7 +61,55 @@ class VideoTranscriber:
             self.image_processor = ImageProcessor()
             print(f"OCR enabled: extracting frames every {frame_interval} seconds")
         
-    def transcribe_video(self, video_path: Path, max_duration: int = 300) -> Dict[str, Any]:
+    def process(self, file_path: Path, max_duration: int = 300) -> Dict[str, Any]:
+        """
+        Process a video file with transcription, OCR, and summary generation.
+        
+        Args:
+            file_path: Path to video file
+            max_duration: Maximum duration to process in seconds (default: 5 minutes)
+            
+        Returns:
+            Dictionary with success status and summary
+        """
+        try:
+            result = self._transcribe_video(file_path, max_duration)
+            
+            if not result['success']:
+                return {
+                    'success': False,
+                    'summary': '',
+                    'error': result.get('error', 'Unknown error')
+                }
+            
+            # Build final summary with metadata
+            summary = result.get('summary', '')
+            if not summary:
+                summary = '(No summary generated)'
+            
+            # Append video info
+            video_info = self.get_video_info(file_path)
+            if 'duration' in video_info and video_info['duration'] > 0:
+                duration_min = int(video_info['duration'] // 60)
+                duration_sec = int(video_info['duration'] % 60)
+                summary += f"\n\nMetadata: Duration: {duration_min}m {duration_sec}s"
+                if 'format' in video_info:
+                    summary += f", Format: {video_info['format']}"
+            
+            return {
+                'success': True,
+                'summary': summary
+            }
+            
+        except Exception as e:
+            print(f"  Error processing {file_path.name}: {str(e)}")
+            return {
+                'success': False,
+                'summary': '',
+                'error': str(e)
+            }
+    
+    def _transcribe_video(self, video_path: Path, max_duration: int = 300) -> Dict[str, Any]:
         """
         Transcribe audio from a video file.
         

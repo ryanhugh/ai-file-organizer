@@ -1,6 +1,12 @@
 """
 Image file processor.
 """
+# Import fix must be first - enables running as both module and script
+try:
+    from . import _import_fix
+except ImportError:
+    import _import_fix
+
 import sys
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -12,11 +18,15 @@ import numpy as np
 from PIL import Image
 from PIL.ExifTags import TAGS
 
-from .summary import SummaryGenerator
+from processors.base import MediaProcessor
+from processors.summary import SummaryGenerator
 
 
-class ImageProcessor:
+class ImageProcessor(MediaProcessor):
     """Process image files."""
+    
+    # Supported image file extensions
+    SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.heic', '.heif'}
     
     def __init__(self, llm_client=None):
         """
@@ -32,78 +42,90 @@ class ImageProcessor:
         self.summary_generator = SummaryGenerator(llm_client=llm_client)
         print("OCR enabled for image processing")
     
-    def process(self, file_path: Path) -> Dict[str, Any]:
-        """Extract metadata from image files."""
+    def _get_metadata(self, file_path: Path) -> str:
+        """Extract and format metadata from image files."""
         try:
             with Image.open(file_path) as img:
-                metadata = {
-                    'dimensions': f"{img.width}x{img.height}",
-                    'format': img.format,
-                    'mode': img.mode
-                }
+                parts = []
+                parts.append(f"Dimensions: {img.width}x{img.height}")
+                parts.append(f"Format: {img.format}")
                 
                 # Extract EXIF data if available
                 exif_data = img.getexif()
                 if exif_data:
-                    exif = {}
+                    exif_items = []
                     for tag_id, value in exif_data.items():
                         tag = TAGS.get(tag_id, tag_id)
-                        exif[tag] = str(value)[:100]  # Limit value length
-                    metadata['exif'] = exif
+                        if tag in ['DateTime', 'Make', 'Model', 'Software']:
+                            exif_items.append(f"{tag}: {str(value)[:50]}")
+                    if exif_items:
+                        parts.extend(exif_items)
                     
-                return metadata
+                return ', '.join(parts)
         except Exception as e:
-            return {'error': str(e)}
+            return f"Error reading metadata: {str(e)}"
     
-    def format_metadata(self, file_path: Path, metadata: Dict[str, Any]) -> str:
-        """Format image metadata as a string."""
-        if 'error' in metadata:
-            return f"Image file: {file_path.name} (error: {metadata['error']})"
-        
-        return f"Image file: {file_path.name}, {metadata.get('dimensions', 'unknown dimensions')}"
     
-    def ocr_image(self, image_path: Path) -> Dict[str, Any]:
+    def process(self, file_path: Path) -> Dict[str, Any]:
         """
-        Perform OCR on a single image file and generate a summary.
+        Process an image file with OCR and generate a summary.
         
         Args:
-            image_path: Path to image file
+            file_path: Path to image file
             
         Returns:
-            Dictionary with OCR text and summary
+            Dictionary with success status and summary
         """
         try:
             # Read image with OpenCV
-            frame = cv2.imread(str(image_path))
+            frame = cv2.imread(str(file_path))
             if frame is None:
-                return {'text': '', 'summary': '', 'success': False}
+                return {
+                    'success': False,
+                    'summary': '',
+                    'error': 'Failed to read image file'
+                }
             
+            # Perform OCR
             ocr_text = self.ocr_frame(frame)
             
             # Print the OCR text
             if ocr_text:
-                print(f"\n  📝 OCR Text from {image_path.name}:")
+                print(f"\n  📝 OCR Text from {file_path.name}:")
                 print(f"  {'-' * 70}")
                 print(f"  {ocr_text}")
                 print(f"  {'-' * 70}\n")
             
             # Generate summary
-            summary = self._generate_summary(image_path.name, ocr_text)
+            summary = self._generate_summary(file_path.name, ocr_text)
+            
+            # Get metadata
+            metadata = self._get_metadata(file_path)
+            
+            # Build final summary with metadata appended
+            final_summary = summary if summary else '(No text detected in image)'
+            
+            if metadata:
+                final_summary += f"\n\nMetadata: {metadata}"
+            
             if summary:
                 print(f"  📋 Summary:")
                 print(f"  {'-' * 70}")
-                print(f"  {summary}")
+                print(f"  {final_summary}")
                 print(f"  {'-' * 70}\n")
             
             return {
-                'text': ocr_text,
-                'summary': summary,
-                'success': True
+                'success': True,
+                'summary': final_summary
             }
             
         except Exception as e:
-            print(f"  Error performing OCR on {image_path.name}: {str(e)}")
-            return {'text': '', 'summary': '', 'error': str(e), 'success': False}
+            print(f"  Error processing {file_path.name}: {str(e)}")
+            return {
+                'success': False,
+                'summary': '',
+                'error': str(e)
+            }
     
     def ocr_frame(self, frame: np.ndarray) -> str:
         """
@@ -192,40 +214,40 @@ Text visible in image:
 {ocr_text[:1000]}"""
         
         # Create prompt for summary
-        prompt = f"""Based on the following image content, write a single concise paragraph (2-3 sentences) describing what this image is about. Focus on the main topic, what's being shown, and any key information.
+        prompt = f"""Based on the following text extracted from an image, write a single concise paragraph (2-3 sentences) describing what this image is about. Focus on the main topic, what's being shown, and any key information (eg proper names, dates, etc).
 
 {context}
 
 Summary:"""
+
+        print('prompt we are sending to llm to make summary', prompt)
         
         return self.summary_generator.generate(prompt)
 
 
 if __name__ == '__main__':
     # Test the image processor
-    # if len(sys.argv) < 2:
-    #     print("Usage: python processors/images.py '/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-11-08 at 3.30.59 PM.png'")
-    #     sys.exit(1)
+    import ollama
     
+    # NOTE this file name has some odd character in it just before PM. THis character is not a normal space. 
     image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-11-08 at 3.30.59 PM.png')
     if not image_path.exists():
         print(f"Error: File not found: {image_path}")
+        print("Please update the path in the script or provide a valid image path")
         sys.exit(1)
     
-    processor = ImageProcessor()
+    # Initialize with LLM client for summary generation
+    print("Initializing Ollama client...")
+    llm_client = ollama.Client()
+    processor = ImageProcessor(llm_client=llm_client)
     
     print(f"Processing: {image_path.name}")
     print("=" * 50)
     
-    # Get metadata
-    metadata = processor.process(image_path)
-    print(f"Metadata: {metadata}")
-    
-    # Perform OCR
-    result = processor.ocr_image(image_path)
+    # Process the image
+    result = processor.process(image_path)
     if result['success']:
-        print(f"\nOCR Result:")
-        print(f"Text: {result['text'] if result['text'] else '(No text detected)'}")
-        print(f"Summary: {result['summary'] if result['summary'] else '(No summary generated)'}")
+        print(f"\n✓ Success!")
+        print(f"Summary:\n{result['summary']}")
     else:
-        print(f"Error: {result.get('error', 'Unknown error')}")
+        print(f"✗ Error: {result.get('error', 'Unknown error')}")

@@ -1,5 +1,66 @@
 # Architecture Overview
 
+## Base Class Pattern
+
+All media processors inherit from `MediaProcessor` base class:
+
+```python
+class MediaProcessor(ABC):
+    """Abstract base class for media file processors."""
+    
+    @property
+    @abstractmethod
+    def SUPPORTED_EXTENSIONS(self) -> Set[str]:
+        """Return set of supported file extensions."""
+        pass
+    
+    @abstractmethod
+    def process(self, file_path: Path) -> Dict[str, Any]:
+        """Process a media file and return results."""
+        pass
+```
+
+## Processor Implementations
+
+### ImageProcessor
+- **Inherits from**: `MediaProcessor`
+- **Main method**: `process(file_path)` 
+- **Returns**: `{'success': bool, 'summary': str, 'error': str (optional)}`
+- **Summary format**: One paragraph + metadata (dimensions, format, EXIF)
+
+### VideoTranscriber
+- **Inherits from**: `MediaProcessor`
+- **Main method**: `process(file_path, max_duration=300)`
+- **Returns**: `{'success': bool, 'summary': str, 'error': str (optional)}`
+- **Summary format**: One paragraph + metadata (duration, format)
+
+## File-Type Agnostic Processing
+
+`process_desktop_media.py` is completely agnostic to file types:
+
+1. **Processor registration**: Builds `ext_to_processor` mapping from `SUPPORTED_EXTENSIONS`
+2. **File discovery**: Finds all files matching any registered extension
+3. **Processing**: Calls `processor.process(file_path)` for each file
+4. **Result handling**: Treats all results uniformly (just filename + summary text)
+
+### Benefits
+
+- **Extensibility**: Add new processor types without changing main script
+- **Consistency**: All processors follow same interface
+- **Simplicity**: Main script doesn't need to know about images vs videos
+- **Maintainability**: File-type specific logic stays in processor classes
+
+## Adding New Processor Types
+
+To add a new media type (e.g., audio, documents):
+
+1. Create new processor class inheriting from `MediaProcessor`
+2. Define `SUPPORTED_EXTENSIONS` class attribute
+3. Implement `process(file_path)` method returning standard format
+4. Add instance to `processors` list in `process_desktop_media.py`
+
+That's it! No other changes needed
+
 This document explains how the file organizer works internally.
 
 ## System Components

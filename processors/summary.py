@@ -1,6 +1,12 @@
 """
 Summary generation with caching support.
 """
+# Import fix must be first - enables running as both module and script
+try:
+    from . import _import_fix
+except ImportError:
+    import _import_fix
+
 import hashlib
 import json
 import sys
@@ -8,8 +14,6 @@ import threading
 from pathlib import Path
 from typing import Optional, Dict
 
-# Add parent directory to path to import utils
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils import find_project_root
 
 
