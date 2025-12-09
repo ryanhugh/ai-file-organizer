@@ -13,7 +13,7 @@ from typing import List, Optional
 from file_extractor import FileExtractor
 from llm_categorizer import LLMCategorizer
 from project_manager import ProjectManager
-from video_transcriber import VideoTranscriber
+from processors.videos import VideoTranscriber
 
 
 class FileOrganizer:

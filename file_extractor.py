@@ -37,6 +37,13 @@ class FileExtractor:
         self.image_processor = ImageProcessor()
         self.archive_processor = ArchiveProcessor(max_text_size, extract_text_files=True)
         
+        # Give archive processor access to other processors for deep processing
+        self.archive_processor.other_processors = {
+            'doc': self.doc_processor,
+            'text': self.text_processor,
+            'image': self.image_processor
+        }
+        
     def extract(self, file_path: Path) -> Dict[str, Any]:
         """
         Extract content and metadata from a file.

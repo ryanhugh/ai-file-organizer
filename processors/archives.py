@@ -5,7 +5,7 @@ from pathlib import Path
 import zipfile
 import tarfile
 import tempfile
-from typing import Optional
+from typing import Optional, Dict, Any
 
 
 class ArchiveProcessor:
@@ -21,6 +21,7 @@ class ArchiveProcessor:
         """
         self.max_text_size = max_text_size
         self.extract_text_files = extract_text_files
+        self.other_processors = None  # Will be set by FileExtractor
     
     def process(self, file_path: Path, llm_client=None) -> str:
         """
@@ -54,15 +55,38 @@ class ArchiveProcessor:
             # Categorize files by type
             file_types = {}
             text_files = []
+            has_folders = False
+            has_nested_archives = False
+            actual_files = []  # Files excluding system files
             
             for name in file_list:
+                # Skip macOS system files
+                if '/__MACOSX/' in name or name.startswith('__MACOSX/') or '._' in name:
+                    continue
+                
+                # Check if it's a directory
+                if name.endswith('/'):
+                    has_folders = True
+                    continue
+                
+                actual_files.append(name)
                 file_ext = Path(name).suffix.lower()
+                
                 if file_ext:
                     file_types[file_ext] = file_types.get(file_ext, 0) + 1
+                
+                # Check for nested archives
+                if file_ext in ['.zip', '.tar', '.gz', '.rar', '.7z', '.bz2']:
+                    has_nested_archives = True
                 
                 # Track text files for potential extraction
                 if self.extract_text_files and file_ext in ['.txt', '.md', '.json', '.csv', '.log', '.py', '.js', '.html', '.css']:
                     text_files.append(name)
+            
+            # Decide whether to deeply process files
+            should_deep_process = self._should_deep_process(
+                len(actual_files), has_folders, has_nested_archives, file_types, llm_client
+            )
             
             # Build description
             description = f"Archive file: {file_path.name}\n"
@@ -73,15 +97,54 @@ class ArchiveProcessor:
                 for ext, count in sorted(file_types.items(), key=lambda x: x[1], reverse=True)[:10]:
                     description += f"  {ext}: {count} files\n"
             
-            # Extract and read text files if enabled
+            # Process files if decision says we should
             extracted_content = []
-            if self.extract_text_files and text_files:
+            if should_deep_process and self.other_processors:
+                description += f"\n🔍 Deep processing {len(actual_files)} files...\n"
+                
+                # Extract to temp directory and process each file
+                import tempfile
+                import os
+                
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    for file_name in actual_files[:10]:  # Limit to 10 files
+                        try:
+                            file_info = zf.getinfo(file_name)
+                            if file_info.file_size > 10 * 1024 * 1024:  # Skip files > 10MB
+                                continue
+                            
+                            # Extract file
+                            extracted_path = Path(temp_dir) / Path(file_name).name
+                            with open(extracted_path, 'wb') as f:
+                                f.write(zf.read(file_name))
+                            
+                            # Process based on file type
+                            file_ext = extracted_path.suffix.lower()
+                            content = None
+                            
+                            if file_ext in ['.txt', '.md', '.log', '.py', '.js', '.html', '.css', '.json', '.csv']:
+                                content = self.other_processors['text'].process(extracted_path)
+                            elif file_ext == '.pdf':
+                                content = self.other_processors['doc'].process_pdf(extracted_path)
+                            elif file_ext in ['.docx', '.doc']:
+                                content = self.other_processors['doc'].process_docx(extracted_path)
+                            elif file_ext in ['.xlsx', '.xls']:
+                                content = self.other_processors['doc'].process_excel(extracted_path)
+                            
+                            if content and len(content.strip()) > 0:
+                                extracted_content.append(f"\n--- {file_name} ---\n{content[:800]}")
+                        except Exception as e:
+                            pass
+                
+                if extracted_content:
+                    description += "\nProcessed file contents:\n"
+                    description += "\n".join(extracted_content)
+            elif self.extract_text_files and text_files:
+                # Fallback to simple text extraction
                 description += f"\n📄 Found {len(text_files)} readable text files\n"
                 
-                # Extract up to 5 text files
                 for text_file in text_files[:5]:
                     try:
-                        # Skip if file is too large
                         file_info = zf.getinfo(text_file)
                         if file_info.file_size > 100000:  # Skip files > 100KB
                             continue
@@ -180,6 +243,63 @@ class ArchiveProcessor:
             
             return description
     
+    def _should_deep_process(self, num_files: int, has_folders: bool, has_nested_archives: bool, 
+                             file_types: Dict[str, int], llm_client) -> bool:
+        """
+        Decide whether to deeply process files in the archive.
+        
+        Rules:
+        1. If < 5 files, no folders, no nested archives -> always process
+        2. If simple structure (few files, common types) -> process
+        3. Otherwise, ask LLM to decide
+        """
+        # Rule 1: Simple case - few files, flat structure, no nested archives
+        if num_files < 5 and not has_folders and not has_nested_archives:
+            return True
+        
+        # Rule 2: Small number of processable files
+        processable_types = {'.txt', '.md', '.json', '.csv', '.log', '.py', '.js', '.html', '.css', '.pdf', '.docx', '.doc'}
+        processable_count = sum(count for ext, count in file_types.items() if ext in processable_types)
+        
+        if processable_count > 0 and processable_count <= 5 and not has_nested_archives:
+            return True
+        
+        # Rule 3: Large or complex archive - ask LLM
+        if llm_client and num_files > 5:
+            try:
+                file_types_str = ", ".join([f"{count} {ext} files" for ext, count in sorted(file_types.items(), key=lambda x: x[1], reverse=True)[:5]])
+                
+                prompt = f"""You are analyzing an archive file to decide if we should extract and process its contents.
+
+Archive info:
+- Number of files: {num_files}
+- Has subdirectories: {has_folders}
+- Has nested archives: {has_nested_archives}
+- File types: {file_types_str}
+
+Should we extract and deeply process the files inside this archive? Answer with just "yes" or "no" and a brief reason.
+
+Consider:
+- If it's a small backup or export with a few documents/text files -> yes
+- If it's a large codebase or complex project structure -> no
+- If it has many nested archives or binary files -> no
+- If it's clearly documentation or data files -> yes
+
+Answer:"""
+                
+                response = llm_client.generate(
+                    model='llama3.2:3b',
+                    prompt=prompt
+                )
+                
+                answer = response['response'].strip().lower()
+                return 'yes' in answer[:20]  # Check first 20 chars for "yes"
+            except:
+                pass
+        
+        # Default: don't deep process large/complex archives
+        return False
+    
     def _generate_summary(self, filename: str, content: str, llm_client) -> Optional[str]:
         """Generate a summary of the archive using LLM."""
         try:
@@ -197,3 +317,15 @@ Summary:"""
             return response['response'].strip()
         except Exception as e:
             return None
+
+if __name__ == '__main__':
+    # Test archive processor
+    from pathlib import Path
+    import ollama
+    
+    processor = ArchiveProcessor()
+    test_path = Path("/Users/ryanhughes/Desktop/file-organizer-test/a zip file.zip")
+    
+    if test_path.exists():
+        result = processor.process(test_path, ollama)
+        print(result)

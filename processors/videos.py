@@ -19,18 +19,8 @@ try:
 except ImportError:
     FFMPEG_AVAILABLE = False
 
-try:
-    import cv2
-    CV2_AVAILABLE = True
-except ImportError:
-    CV2_AVAILABLE = False
-
-try:
-    import easyocr
-    from PIL import Image
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
+import cv2
+from .images import ImageProcessor
 
 
 class VideoTranscriber:
@@ -62,22 +52,14 @@ class VideoTranscriber:
         
         self.enable_ocr = enable_ocr
         self.frame_interval = frame_interval
-        self.ocr_reader = None
+        self.image_processor = None
         self.llm_client = llm_client
         
         if enable_ocr:
-            if not CV2_AVAILABLE:
-                print("Warning: OpenCV not available. Frame extraction disabled.")
-                self.enable_ocr = False
-            elif not OCR_AVAILABLE:
-                print("Warning: EasyOCR not available. OCR disabled.")
-                self.enable_ocr = False
-            else:
-                print(f"Initializing EasyOCR (this may take a moment)...")
-                # Initialize EasyOCR with English support
-                # gpu=False for CPU, set to True if you have CUDA
-                self.ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-                print(f"OCR enabled: extracting frames every {frame_interval} seconds")
+            print(f"Initializing ImageProcessor")
+            # Initialize ImageProcessor
+            self.image_processor = ImageProcessor()
+            print(f"OCR enabled: extracting frames every {frame_interval} seconds")
         
     def transcribe_video(self, video_path: Path, max_duration: int = 300) -> Dict[str, Any]:
         """
@@ -282,7 +264,7 @@ class VideoTranscriber:
         Returns:
             Combined OCR text from all frames
         """
-        if not CV2_AVAILABLE or not OCR_AVAILABLE:
+        if not self.image_processor:
             return ""
         
         try:
@@ -331,8 +313,8 @@ class VideoTranscriber:
                 if frame is None:
                     continue
                 
-                # Perform OCR on frame
-                text = self._ocr_frame(frame)
+                # Perform OCR on frame using ImageProcessor
+                text = self.image_processor.ocr_frame(frame) if self.image_processor else ""
                 raw_text_len = len(text) if text else 0
                 cleaned_text_len = len(text.strip()) if text else 0
                 
@@ -379,75 +361,6 @@ class VideoTranscriber:
         except Exception as e:
             print(f"  Error extracting frames: {str(e)}")
             return ""
-    
-    def _ocr_frame(self, frame) -> str:
-        """
-        Perform OCR on a single video frame using EasyOCR.
-        
-        Args:
-            frame: OpenCV frame (numpy array)
-            
-        Returns:
-            Extracted text
-        """
-        try:
-            if self.ocr_reader is None:
-                return ""
-            
-            # EasyOCR works directly with numpy arrays (OpenCV frames)
-            # It handles preprocessing internally
-            results = self.ocr_reader.readtext(frame, detail=0, paragraph=True)
-            
-            # Combine all detected text
-            text = '\n'.join(results)
-            
-            # Clean up the text
-            text = self._clean_ocr_text(text)
-            
-            return text
-            
-        except Exception as e:
-            return ""
-    
-    def _clean_ocr_text(self, text: str) -> str:
-        """
-        Clean up OCR output to remove garbage.
-        
-        Args:
-            text: Raw OCR text
-            
-        Returns:
-            Cleaned text
-        """
-        if not text:
-            return ""
-        
-        lines = text.split('\n')
-        cleaned_lines = []
-        
-        for line in lines:
-            line = line.strip()
-            
-            # Skip empty lines
-            if not line:
-                continue
-            
-            # Skip lines that are mostly non-alphanumeric (likely garbage)
-            alphanumeric_count = sum(c.isalnum() or c.isspace() for c in line)
-            if len(line) > 0 and alphanumeric_count / len(line) < 0.5:
-                continue
-            
-            # Skip very short lines (likely noise) - but allow short meaningful words
-            if len(line) < 2:
-                continue
-            
-            # Skip lines with too many repeated characters (likely artifacts)
-            if any(line.count(char) > len(line) * 0.5 for char in set(line)):
-                continue
-            
-            cleaned_lines.append(line)
-        
-        return '\n'.join(cleaned_lines)
     
     def _generate_summary(self, filename: str, audio_text: str, ocr_text: str) -> str:
         """
