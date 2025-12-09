@@ -13,9 +13,15 @@ import tarfile
 import tempfile
 from typing import Optional, Dict, Any
 
+from processors.base import MediaProcessor
+from llm_client import get_llm_client
 
-class ArchiveProcessor:
+
+class ArchiveProcessor(MediaProcessor):
     """Process archive files."""
+    
+    # Supported archive file extensions
+    SUPPORTED_EXTENSIONS = {'.zip', '.tar', '.gz', '.bz2', '.xz', '.tar.gz', '.tar.bz2', '.tar.xz'}
     
     def __init__(self, max_text_size: int = 50000, extract_text_files: bool = True):
         """
@@ -27,30 +33,55 @@ class ArchiveProcessor:
         """
         self.max_text_size = max_text_size
         self.extract_text_files = extract_text_files
-        self.other_processors = None  # Will be set by FileExtractor
+        self.other_processors = None  # Will be set when needed
     
-    def process(self, file_path: Path, llm_client=None) -> str:
+    def process(self, file_path: Path) -> Dict[str, Any]:
         """
         Extract information about archive contents.
         
         Args:
             file_path: Path to archive file
-            llm_client: Optional LLM client for generating summaries
             
         Returns:
-            Description of archive contents
+            Dictionary with success status and summary (archive description)
         """
         ext = file_path.suffix.lower()
         
+        # Initialize other processors if not already set
+        if self.other_processors is None:
+            from processors.images import ImageProcessor
+            from processors.videos import VideoTranscriber
+            from processors.documents import DocumentProcessor
+            from processors.text import TextProcessor
+            
+            self.other_processors = {
+                'image': ImageProcessor(),
+                'video': VideoTranscriber(model_size="base", enable_ocr=True, frame_interval=5),
+                'document': DocumentProcessor(),
+                'text': TextProcessor()
+            }
+        
         try:
+            llm_client = get_llm_client()
+            
             if ext == '.zip':
-                return self._process_zip(file_path, llm_client)
+                summary = self._process_zip(file_path, llm_client)
             elif ext in ['.tar', '.gz', '.bz2']:
-                return self._process_tar(file_path, llm_client)
+                summary = self._process_tar(file_path, llm_client)
             else:
-                return f"Archive file: {file_path.name} (format not fully supported)"
+                summary = f"Archive file: {file_path.name} (format not fully supported)"
+            
+            return {
+                'success': True,
+                'summary': summary
+            }
+            
         except Exception as e:
-            return f"Archive file: {file_path.name}\nError reading archive: {str(e)}"
+            return {
+                'success': False,
+                'summary': '',
+                'error': str(e)
+            }
     
     def _process_zip(self, file_path: Path, llm_client=None) -> str:
         """Process ZIP archive."""
@@ -340,21 +371,8 @@ if __name__ == '__main__':
     from pathlib import Path
     from llm_client import get_llm_client
     
-    # Initialize processor
+    # Initialize processor (other processors will be auto-initialized on first use)
     processor = ArchiveProcessor()
-    
-    # Initialize other processors for deep processing
-    from processors.images import ImageProcessor
-    from processors.videos import VideoTranscriber
-    from processors.documents import DocumentProcessor
-    from processors.text import TextProcessor
-    
-    processor.other_processors = {
-        'image': ImageProcessor(),
-        'video': VideoTranscriber(model_size="base", enable_ocr=True, frame_interval=5),
-        'document': DocumentProcessor(),
-        'text': TextProcessor()
-    }
     
     # Test with a file path from command line or use default
     if len(sys.argv) > 1:
@@ -370,5 +388,13 @@ if __name__ == '__main__':
     print(f"Testing ArchiveProcessor with: {test_path.name}")
     print("=" * 80)
     
-    result = processor.process(test_path, get_llm_client())
-    print(result)
+    result = processor.process(test_path)
+    
+    if result['success']:
+        print(f"\n✓ Successfully processed {test_path.name}")
+        print(f"\nArchive summary:")
+        print("=" * 80)
+        print(result['summary'])
+        print("=" * 80)
+    else:
+        print(f"\n✗ Error: {result.get('error', 'Unknown error')}")
