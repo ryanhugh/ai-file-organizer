@@ -10,18 +10,16 @@ except ImportError:
 import hashlib
 import json
 import sys
-import threading
 from pathlib import Path
 from typing import Optional, Dict
+
+from filelock import FileLock
 
 from utils import find_project_root
 
 
 class SummaryGenerator:
     """Generate summaries using LLM with caching."""
-    
-    # Class-level lock for thread-safe cache access
-    _cache_lock = threading.Lock()
     
     def __init__(self, llm_client=None):
         """
@@ -36,13 +34,16 @@ class SummaryGenerator:
         cache_dir = find_project_root() / '.cache'
         cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_file = cache_dir / 'summaries.json'
+        self.lock_file = cache_dir / 'summaries.json.lock'
         print('using cache file:', self.cache_file)
         
         # Initialize cache file if it doesn't exist
         if not self.cache_file.exists():
-            with self._cache_lock:
-                with open(self.cache_file, 'w', encoding='utf-8') as f:
-                    json.dump({}, f)
+            with FileLock(str(self.lock_file)):
+                # Double-check after acquiring lock
+                if not self.cache_file.exists():
+                    with open(self.cache_file, 'w', encoding='utf-8') as f:
+                        json.dump({}, f)
     
     def _get_cache_key(self, prompt: str) -> str:
         """
@@ -58,7 +59,7 @@ class SummaryGenerator:
     
     def _read_cache(self, cache_key: str) -> Optional[str]:
         """
-        Read summary from cache (thread-safe).
+        Read summary from cache (process-safe with file locking).
         
         Args:
             cache_key: Cache key to look up
@@ -66,7 +67,7 @@ class SummaryGenerator:
         Returns:
             Cached summary or None if not found
         """
-        with self._cache_lock:
+        with FileLock(str(self.lock_file)):
             try:
                 with open(self.cache_file, 'r', encoding='utf-8') as f:
                     cache_data = json.load(f)
@@ -77,13 +78,13 @@ class SummaryGenerator:
     
     def _write_cache(self, cache_key: str, summary: str):
         """
-        Write summary to cache (thread-safe).
+        Write summary to cache (process-safe with file locking).
         
         Args:
             cache_key: Cache key
             summary: Summary to cache
         """
-        with self._cache_lock:
+        with FileLock(str(self.lock_file)):
             try:
                 # Read existing cache
                 cache_data = {}
