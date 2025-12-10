@@ -6,6 +6,9 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 from multiprocessing import Process, Queue, Manager
+import psutil
+import os
+import signal
 from processors.images import ImageProcessor
 from processors.videos import VideoTranscriber
 from processors.documents import DocumentProcessor
@@ -53,7 +56,10 @@ def worker_process(worker_id: int, task_queue: Queue, result_queue: Queue):
         
         # None signals end of work
         if file_path_str is None:
+            print(f"Worker {worker_id}: Received poison pill, exiting")
             break
+        
+        print(f"Worker {worker_id}: Processing {Path(file_path_str).name}...")
         
         file_path = Path(file_path_str)
         ext = file_path.suffix.lower()
@@ -103,6 +109,32 @@ def worker_process(worker_id: int, task_queue: Queue, result_queue: Queue):
                 'summary': f'(Unexpected error: {str(e)})',
                 'success': False
             })
+    
+    # Clean up all child processes before exiting
+    print(f"Worker {worker_id}: Cleaning up child processes...")
+    try:
+        current_process = psutil.Process(os.getpid())
+        children = current_process.children(recursive=True)
+        
+        for child in children:
+            try:
+                print(f"Worker {worker_id}: Terminating child process {child.pid} ({child.name()})")
+                child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        
+        # Wait a bit for graceful termination
+        gone, alive = psutil.wait_procs(children, timeout=3)
+        
+        # Force kill any remaining processes
+        for child in alive:
+            try:
+                print(f"Worker {worker_id}: Force killing child process {child.pid}")
+                child.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except Exception as e:
+        print(f"Worker {worker_id}: Error during cleanup: {e}")
     
     print(f"Worker {worker_id}: Shutting down")
 
@@ -187,9 +219,19 @@ def process_desktop_media(num_processes: int = 8, group_files: bool = False):
     print(f"{'='*80}\n")
     
     # Collect results from queue
+    print("Collecting results from queue...")
     results = []
     while not result_queue.empty():
         results.append(result_queue.get())
+    print(f"✓ Collected {len(results)} results")
+    
+    # Close queues to prevent hanging on exit
+    print("Closing queues...")
+    task_queue.close()
+    task_queue.join_thread()
+    result_queue.close()
+    result_queue.join_thread()
+    print("✓ Queues closed")
     
     # Write results to log file
     print(f"\n{'='*80}")

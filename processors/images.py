@@ -31,13 +31,53 @@ class ImageProcessor(MediaProcessor):
     SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.heic', '.heif'}
     
     def __init__(self):
-        """Initialize the image processor with OCR enabled."""
+        """Initialize the image processor with OCR and vision model enabled."""
         print("Initializing EasyOCR for image text extraction...")
         # Initialize EasyOCR with English support
         self.ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
         self.summary_generator = SummaryGenerator()
         self.ocr_cache = FileCache('ocr')
+        self.vision_cache = FileCache('vision')  # Separate cache for LLaVA
         print("OCR enabled for image processing")
+    
+    def _analyze_with_vision_model(self, file_path: Path) -> str:
+        """
+        Analyze image using LLaVA vision model.
+        
+        Args:
+            file_path: Path to image file
+            
+        Returns:
+            Description of what's in the image
+        """
+        # Check vision cache first
+        file_hash = self.vision_cache.get_file_hash(file_path)
+        cached_description = self.vision_cache.get(file_hash)
+        
+        if cached_description is not None:
+            print(f"  ✓ Using cached vision analysis for {file_path.name}")
+            return cached_description
+        
+        try:
+            llm_client = get_llm_client()
+            
+            # Use LLaVA to analyze the image
+            response = llm_client.generate(
+                model='llava:7b',  # or 'llava:13b' for better quality
+                prompt='Describe what you see in this image in detail. Include any text, UI elements, people, objects, or activities visible. Be specific about colors, layout, and context.',
+                images=[str(file_path)]
+            )
+            
+            description = response['response'].strip()
+            
+            # Cache the result
+            self.vision_cache.set(file_hash, description)
+            
+            return description
+            
+        except Exception as e:
+            print(f"  Warning: Vision model analysis failed: {str(e)}")
+            return ""
     
     def _get_metadata(self, file_path: Path) -> str:
         """Extract and format metadata from image files."""
@@ -103,8 +143,17 @@ class ImageProcessor(MediaProcessor):
                 print(f"  {ocr_text}")
                 print(f"  {'-' * 70}\n")
             
-            # Generate summary
-            summary = self._generate_summary(file_path.name, ocr_text)
+            # Analyze with vision model
+            vision_description = self._analyze_with_vision_model(file_path)
+            
+            if vision_description:
+                print(f"\n  👁️  Vision Model Analysis:")
+                print(f"  {'-' * 70}")
+                print(f"  {vision_description}")
+                print(f"  {'-' * 70}\n")
+            
+            # Generate summary combining OCR and vision analysis
+            summary = self._generate_summary(file_path.name, ocr_text, vision_description)
             
             # Get metadata
             metadata = self._get_metadata(file_path)
@@ -202,28 +251,34 @@ class ImageProcessor(MediaProcessor):
         
         return '\n'.join(cleaned_lines)
     
-    def _generate_summary(self, filename: str, ocr_text: str) -> str:
+    def _generate_summary(self, filename: str, ocr_text: str, vision_description: str = "") -> str:
         """
         Generate a concise summary of the image content using LLM.
         
         Args:
             filename: Name of the image file
             ocr_text: OCR text from the image
+            vision_description: Description from vision model
             
         Returns:
             One paragraph summary
         """
-        if not ocr_text or not ocr_text.strip():
+        if not ocr_text and not vision_description:
             return ""
         
         # Build context for the LLM
-        context = f"""Image file: {filename}
-
-Text visible in image:
-{ocr_text[:1000]}"""
+        context_parts = [f"Image file: {filename}"]
+        
+        if vision_description:
+            context_parts.append(f"\nVisual description:\n{vision_description[:500]}")
+        
+        if ocr_text:
+            context_parts.append(f"\nText visible in image:\n{ocr_text[:1000]}")
+        
+        context = "\n".join(context_parts)
         
         # Create prompt for summary
-        prompt = f"""Based on the following text extracted from an image, write a single concise paragraph (2-3 sentences) describing what this image is about. Focus on the main topic, what's being shown, and any key information (eg proper names, dates, etc).
+        prompt = f"""Based on the following information about an image, write a single concise paragraph (2-3 sentences) describing what this image is about. Focus on the main topic, what's being shown, and any key information (eg proper names, dates, etc).
         Super important to keep proper names and dates, including S3 bucket names. 
 
         DO not say "This image appears to be a screenshot of " or any other filler text just get right to the point. eg "An image of a child process..."
@@ -242,8 +297,8 @@ if __name__ == '__main__':
     
     # NOTE this file name has some odd character in it just before PM. THis character is not a normal space. 
     # image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-11-08 at 3.30.59 PM.png')
-    # image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-11-05 at 11.14.04 AM.png')
-    image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-10-22 at 8.54.40 PM.png')
+    image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-10-21 at 5.56.00 PM.png')
+    # image_path = Path('/Users/ryanhughes/Desktop/file-organizer-test/Screenshot 2025-10-22 at 8.54.40 PM.png')
     if not image_path.exists():
         print(f"Error: File not found: {image_path}")
         print("Please update the path in the script or provide a valid image path")

@@ -55,13 +55,169 @@ class VideoTranscriber(MediaProcessor):
         self.image_processor = None
         self.summary_generator = SummaryGenerator()
         self.transcription_cache = FileCache('transcription')
+        self.video_vision_cache = FileCache('video_vision')  # Cache for LLaVA video analysis
+        self.minicpm_cache = FileCache('minicpm_vision')  # Cache for MiniCPM-V analysis
         
         if enable_ocr:
             print(f"Initializing ImageProcessor")
             # Initialize ImageProcessor
             self.image_processor = ImageProcessor()
             print(f"OCR enabled: extracting frames every {frame_interval} seconds")
+    
+    def _extract_video_frames(self, video_path: Path, frame_interval_seconds: int = 3, max_frames: int = 20) -> list:
+        """
+        Extract frames from video at regular intervals.
         
+        Args:
+            video_path: Path to video file
+            frame_interval_seconds: Extract 1 frame every N seconds
+            max_frames: Maximum number of frames to extract
+            
+        Returns:
+            List of paths to extracted frame images (in temp directory)
+        """
+        import tempfile
+        import numpy as np
+        
+        cap = cv2.VideoCapture(str(video_path))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        
+        if total_frames == 0 or fps == 0:
+            cap.release()
+            return []
+        
+        # Calculate number of frames to sample
+        num_frames = int((total_frames / fps) / frame_interval_seconds)
+        num_frames = max(1, min(num_frames, max_frames))
+        
+        frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+        frame_paths = []
+        
+        # Create temp directory for frames
+        temp_dir = tempfile.mkdtemp()
+        
+        for i, idx in enumerate(frame_indices):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if ret:
+                frame_path = Path(temp_dir) / f"frame_{i}.jpg"
+                cv2.imwrite(str(frame_path), frame)
+                frame_paths.append(str(frame_path))
+        
+        cap.release()
+        
+        return frame_paths
+        
+    def _analyze_video_with_vision_model(self, video_path: Path) -> str:
+        """
+        Analyze video using LLaVA vision model via Ollama.
+        LLaVA doesn't support video directly, so we extract frames.
+        
+        Args:
+            video_path: Path to video file
+            
+        Returns:
+            Description of what's happening in the video
+        """
+        # Check vision cache first
+        file_hash = self.video_vision_cache.get_file_hash(video_path)
+        cached_description = self.video_vision_cache.get(file_hash)
+        
+        if cached_description is not None:
+            print(f"  ✓ Using cached LLaVA analysis for {video_path.name}")
+            return cached_description
+        
+        try:
+            import shutil
+            
+            llm_client = get_llm_client()
+            
+            # Extract frames from video
+            frame_paths = self._extract_video_frames(video_path, frame_interval_seconds=3, max_frames=20)
+            
+            if not frame_paths:
+                return ""
+            
+            try:
+                # Analyze frames with LLaVA
+                response = llm_client.generate(
+                    model='llava:7b',
+                    prompt='Describe what is happening in these video frames. Include details about any visible UI elements, text, actions, people, or activities. Describe the overall context and purpose.',
+                    images=frame_paths
+                )
+                
+                description = response['response'].strip()
+                
+                # Cache the result
+                self.video_vision_cache.set(file_hash, description)
+                
+                return description
+                
+            finally:
+                # Clean up temp directory
+                if frame_paths:
+                    temp_dir = Path(frame_paths[0]).parent
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            
+        except Exception as e:
+            print(f"  Warning: LLaVA analysis failed: {str(e)}")
+            return ""
+    
+    def _analyze_video_with_minicpm(self, video_path: Path) -> str:
+        """
+        Analyze video using MiniCPM-V model via Ollama.
+        
+        Args:
+            video_path: Path to video file
+            
+        Returns:
+            Description of what's happening in the video
+        """
+        # Check cache first
+        file_hash = self.minicpm_cache.get_file_hash(video_path)
+        cached_description = self.minicpm_cache.get(file_hash)
+        
+        if cached_description is not None:
+            print(f"  ✓ Using cached MiniCPM-V analysis for {video_path.name}")
+            return cached_description
+        
+        try:
+            import shutil
+            
+            llm_client = get_llm_client()
+            
+            # Extract frames from video
+            frame_paths = self._extract_video_frames(video_path, frame_interval_seconds=3, max_frames=20)
+            
+            if not frame_paths:
+                return ""
+            
+            try:
+                # Analyze frames with MiniCPM-V
+                response = llm_client.generate(
+                    model='minicpm-v:latest',
+                    prompt='Describe what is happening in these video frames. Include details about any visible UI elements, text, actions, people, or activities. Describe the overall context and purpose.',
+                    images=frame_paths
+                )
+                
+                description = response['response'].strip()
+                
+                # Cache the result
+                self.minicpm_cache.set(file_hash, description)
+                
+                return description
+                
+            finally:
+                # Clean up temp directory
+                if frame_paths:
+                    temp_dir = Path(frame_paths[0]).parent
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            
+        except Exception as e:
+            print(f"  Warning: MiniCPM-V analysis failed: {str(e)}")
+            return ""
+    
     def process(self, file_path: Path) -> Dict[str, Any]:
         """
         Process a video file with transcription, OCR, and summary generation.
@@ -144,8 +300,25 @@ class VideoTranscriber(MediaProcessor):
                     print(f"  {ocr_text}")
                     print(f"  {'-' * 70}\n")
                 
+                # Get vision analyses (may be cached separately)
+                vision_description = self._analyze_video_with_vision_model(video_path)
+                if vision_description:
+                    print(f"  👁️  LLaVA Analysis:")
+                    print(f"  {'-' * 70}")
+                    print(f"  {vision_description}")
+                    print(f"  {'-' * 70}\n")
+                
+                # its too slow
+                minicpm_description = None # self._analyze_video_with_minicpm(video_path)
+                # minicpm_description = self._analyze_video_with_minicpm(video_path)
+                if minicpm_description:
+                    print(f"  🤖 MiniCPM-V Analysis:")
+                    print(f"  {'-' * 70}")
+                    print(f"  {minicpm_description}")
+                    print(f"  {'-' * 70}\n")
+                
                 # Generate summary (not cached, as it depends on LLM prompt)
-                summary = self._generate_summary(video_path.name, transcription_text, ocr_text)
+                summary = self._generate_summary(video_path.name, transcription_text, ocr_text, vision_description, minicpm_description)
                 if summary:
                     print(f"  📋 Summary:")
                     print(f"  {'-' * 70}")
@@ -155,6 +328,10 @@ class VideoTranscriber(MediaProcessor):
                 combined_text = transcription_text
                 if ocr_text:
                     combined_text = f"{transcription_text}\n\n[Screen Text from Video]:\n{ocr_text}"
+                if vision_description:
+                    combined_text = f"{combined_text}\n\n[LLaVA Visual Description]:\n{vision_description}"
+                if minicpm_description:
+                    combined_text = f"{combined_text}\n\n[MiniCPM-V Visual Description]:\n{minicpm_description}"
                 
                 return {
                     'text': combined_text,
@@ -200,13 +377,32 @@ class VideoTranscriber(MediaProcessor):
                     print(f"  {ocr_text}")
                     print(f"  {'-' * 70}\n")
             
-            # Combine transcription and OCR text
+            # Analyze with vision models (in parallel conceptually)
+            vision_description = self._analyze_video_with_vision_model(video_path)
+            if vision_description:
+                print(f"  👁️  LLaVA Analysis:")
+                print(f"  {'-' * 70}")
+                print(f"  {vision_description}")
+                print(f"  {'-' * 70}\n")
+            
+            minicpm_description = self._analyze_video_with_minicpm(video_path)
+            if minicpm_description:
+                print(f"  🤖 MiniCPM-V Analysis:")
+                print(f"  {'-' * 70}")
+                print(f"  {minicpm_description}")
+                print(f"  {'-' * 70}\n")
+            
+            # Combine transcription, OCR text, and vision descriptions
             combined_text = transcription_text
             if ocr_text:
                 combined_text = f"{transcription_text}\n\n[Screen Text from Video]:\n{ocr_text}"
+            if vision_description:
+                combined_text = f"{combined_text}\n\n[LLaVA Visual Description]:\n{vision_description}"
+            if minicpm_description:
+                combined_text = f"{combined_text}\n\n[MiniCPM-V Visual Description]:\n{minicpm_description}"
             
             # Generate a summary using LLM
-            summary = self._generate_summary(video_path.name, transcription_text, ocr_text)
+            summary = self._generate_summary(video_path.name, transcription_text, ocr_text, vision_description, minicpm_description)
             if summary:
                 print(f"  📋 Summary:")
                 print(f"  {'-' * 70}")
@@ -456,7 +652,7 @@ class VideoTranscriber(MediaProcessor):
             print(f"  Error extracting frames: {str(e)}")
             return ""
     
-    def _generate_summary(self, filename: str, audio_text: str, ocr_text: str) -> str:
+    def _generate_summary(self, filename: str, audio_text: str, ocr_text: str, vision_description: str = "", minicpm_description: str = "") -> str:
         """
         Generate a concise summary of the video content using LLM.
         
@@ -464,12 +660,20 @@ class VideoTranscriber(MediaProcessor):
             filename: Name of the video file
             audio_text: Transcribed audio
             ocr_text: OCR text from video frames
+            vision_description: Visual description from LLaVA
+            minicpm_description: Visual description from MiniCPM-V
             
         Returns:
             One paragraph summary
         """
         # Build context for the LLM
         context_parts = [f"Video file: {filename}"]
+        
+        if vision_description:
+            context_parts.append(f"\nLLaVA visual analysis:\n{vision_description}")
+        
+        if minicpm_description:
+            context_parts.append(f"\nMiniCPM-V visual analysis:\n{minicpm_description}")
         
         if audio_text:
             context_parts.append(f"\nAudio transcription:\n{audio_text[:1000]}")  # Limit to first 1000 chars
@@ -487,3 +691,41 @@ class VideoTranscriber(MediaProcessor):
 Summary:"""
         
         return self.summary_generator.generate(prompt)
+
+
+if __name__ == '__main__':
+    import sys
+    
+    # Test video processor
+    processor = VideoTranscriber()
+    
+    # Test with a file path from command line or use default
+    if len(sys.argv) > 1:
+        test_path = Path(sys.argv[1])
+    else:
+        test_path = Path("/Users/ryanhughes/Desktop/file-organizer-test")
+        video_files = list(test_path.glob("*.mov")) + list(test_path.glob("*.mp4"))
+        if video_files:
+            test_path = video_files[2]
+        else:
+            print("No video files found in test directory")
+            sys.exit(1)
+    
+    if not test_path.exists():
+        print(f"Error: File not found: {test_path}")
+        print("Usage: python videos.py <video_file>")
+        sys.exit(1)
+    
+    print(f"Testing VideoTranscriber with: {test_path.name}")
+    print("=" * 80)
+    
+    result = processor.process(test_path)
+    
+    if result['success']:
+        print(f"\n✓ Successfully processed {test_path.name}")
+        print(f"\nVideo summary:")
+        print("=" * 80)
+        print(result['summary'])
+        print("=" * 80)
+    else:
+        print(f"\n✗ Error: {result.get('error', 'Unknown error')}")
